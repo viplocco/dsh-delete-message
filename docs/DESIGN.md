@@ -120,9 +120,11 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
 
 - [x] ~~`findSeqByMessageId` 的快照路径~~ —— v0.1.2 对照契约类型钉死：settled 助手节点 `data.finalNode.{messageId,seq}`、steering 节点 `data.messageId/data.seq`（`ChatConversationViewNode.data` 按 kind 载荷）；
 - [ ] DOM 增强：user 行识别选择器在真实 DOM（CSS modules hash 类名）下命中；fiber 上溯深度够到 node props；
+  - v0.1.2 首版用"直接子 div 且含直接子按钮"判定，实测把第三方插件插进消息行的包装 div（如 ↩ 触发器的 portal）也当成了操作条 → 同一行出现第二个垃圾桶。终稿加 **`*_actions` CSS-modules 类名令牌**门槛（宿主操作条恒为 `<hash>_actions [<hash>_actions]`，第三方包装不带），另加节流清扫自愈残留图标；
+- [x] ~~助手侧按钮"消失"的最终防御~~ —— 除修复 jsx 单参崩溃外，v0.1.2 终稿给槽位组件套了**自有 ErrorBoundary**（渲染崩溃只打日志并降级为 ⚠ 字形，条目不再退位），订阅 `slots.onEntryError` 把崩溃原因带进我们的日志，并把条目内部的 React Tooltip 换成共享 DOM 气泡（少一层克隆机制）；
 - [x] ~~占位 `user/message` data 形状对照真实日志事件确认~~ —— v0.1.1 以最疼的方式完成了这项验证（见 §5.1）：缺 `source` 导致整个会话历史加载失败；
 - [ ] 删除后浏览器快照推送是否触发转录重渲染（预期会；若否则补一个显式刷新动作）；
-- [x] ~~`sessionIdOf()`（DOM 路径取当前会话 id）接上运行时的实际 accessor~~ —— v0.1.2 改为注入 `sessions` 服务读引擎的 `.selected`，并以助手槽组件渲染时上报的 sessionId 兜底（旧实现读未注入的 `ctx.sessions.selected` 恒为 undefined）；
+- [x] ~~`sessionIdOf()`（DOM 路径取当前会话 id）接上运行时的实际 accessor~~ —— v0.1.2 首版注入 `sessions` 服务实测翻车：插件 fiber 拿到的是惰性取值器，一访问就抛 `cannot get required service "sessions" in inactive context`（点击时成为未捕获拒绝）。终稿改为**纯被动捕获**：助手槽组件渲染时上报 kit 的 `sessionId`，DOM 路径在 fiber 上溯时顺手收集 `props.sessionId`——不 resolve 任何服务，无从抛错；
 - [ ] 安装链路：本地 `link:` 或 Copy-Item 到 profile 安装副本 → `--dump-config` 出现 `# == dsh-delete-message` → `/plugins/dsh-delete-message/client.js` 200 → 重启宿主进程。
 
 ## 7. 版本路线
