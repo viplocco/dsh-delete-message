@@ -138,4 +138,13 @@ describe("buildPlaceholder", () => {
 		assert.notEqual(first.id, second.id);
 		JSON.stringify(first); // must not throw (losslessly serializable)
 	});
+
+	// Regression: the v0.1 placeholder shipped WITHOUT `source`. Append accepted
+	// it (no message-shape check there), the record persisted, and the session
+	// then refused to load forever after — assertMessageEventShape demands a
+	// `{ kind }` source at the reload boundary.
+	it("carries a user source so the persisted event survives load validation", () => {
+		const placeholder = buildPlaceholder("[deleted]");
+		assert.deepEqual(placeholder.source, { kind: "user" });
+	});
 });

@@ -165,6 +165,15 @@ export function assessDeletion(events, seq) {
  * the whole point of the feature is spending fewer tokens on history, not
  * renaming it.
  *
+ * The `source: { kind: "user" }` marker is NOT cosmetic. `Session.append`
+ * validates JSON-serializability and the surface contract but never the message
+ * shape, while the persistence/query boundary (`assertMessageEventShape`)
+ * rejects any message whose source lacks a non-empty string `kind`. A sourceless
+ * placeholder therefore appends cleanly, poisons the durable log, and makes the
+ * whole session refuse to load on the next start — discovered the hard way in
+ * v0.1.0 (session event "message has invalid source"). `{ kind: "user" }` is
+ * the vocabulary every first-party user-message producer uses.
+ *
  * @param {string} [text] - localized placeholder copy.
  * @returns a JSON-safe UserMessage-shaped payload (without envelope fields).
  */
@@ -172,6 +181,7 @@ export function buildPlaceholder(text = "[message deleted]") {
 	return {
 		id: `deleted-${crypto.randomUUID()}`,
 		role: "user",
+		source: { kind: "user" },
 		content: [{ type: "text", text }]
 	};
 }
