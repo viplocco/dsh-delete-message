@@ -1,0 +1,54 @@
+{
+  "name": "dsh-delete-message",
+  "version": "0.1.0",
+  "description": "Per-message delete for DeepSeek Harness — a trash icon beside the copy button on every chat message that removes that message from the derived model context (and the visible transcript) via the official surface-replace contract",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/viplocco/dsh-delete-message.git"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./http": "./src/http.js",
+    "./package.json": "./package.json",
+    "./plugin": "./src/plugin.js",
+    "./surface": "./src/surface.js"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "delete-message",
+    "context-editing",
+    "dsh-bundle",
+    "cordis-plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    }
+  }
+}

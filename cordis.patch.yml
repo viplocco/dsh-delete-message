@@ -1,0 +1,16 @@
+# The dsh-delete-message bundle patch.
+#
+# Adding `dsh-delete-message` to a profile's `dsh.profile.bundles` applies this
+# automatically — there is no YAML for a user to hand-write.
+#
+# No configuration in v0.1: the plugin deletes nothing on its own. Every
+# deletion is one explicit user click on one message's trash icon, confirmed
+# in the UI, served over loopback-only routes.
+#
+# The entry name is the BARE package name, deliberately. The client-module
+# scanner treats it as a package specifier and resolves `<name>/package.json`;
+# a subpath such as `dsh-delete-message/plugin` fails that resolve, is cached
+# as "not a client package", and the icons silently never load.
+- insert:
+    - id: delete-message
+      name: dsh-delete-message
