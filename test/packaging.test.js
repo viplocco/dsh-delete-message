@@ -157,14 +157,37 @@ describe("browser half is one self-contained file", () => {
 		assert.doesNotMatch(source, /window\.confirm/, "confirmations go through the styled dialog replica");
 	});
 
-	// Regression (v0.1.2): the user-row mount anchors to a DIRECT child strip
-	// of the hover root and marks it, so nested strips (JSON-block headers)
-	// and repeat scans can never produce a second icon.
-	it("enhances at most one marked strip per row via direct-child anchoring", () => {
+	// Regression (v0.1.2 follow-up): requiring the `sessions` service handed
+	// the plugin a lazy accessor that threw "cannot get required service
+	// sessions in inactive context" on first click. Session ids must arrive
+	// through passive capture only.
+	it("never resolves the sessions service", () => {
 		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.doesNotMatch(source, /["']sessions["']/, "inject list and ctx access must not mention the sessions service");
+		assert.match(source, /makeSessionIdSource\(\)/, "session ids come from capture, not from a service");
+	});
+
+	// Regression (v0.1.2 follow-up): plain "div with a button" matching once
+	// enhanced third-party portals inside a message row, doubling the icon.
+	// The host strip is identified by its CSS-modules `*_actions` token and
+	// marked on enhancement so repeat scans are no-ops.
+	it("identifies actions strips by their *_actions class token and marks them", () => {
+		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.match(source, /const ACTIONS_TOKEN = \//, "strip qualification must require the host's *_actions token");
+		assert.match(source, /_actions\)\(\?:/, "the token regex must anchor on <hash>_actions");
+		assert.match(source, /looksLikeActionsStrip\(/);
 		assert.match(source, /STRIP_MARK\s*=\s*"data-dsh-delete-enhanced"/);
 		assert.match(source, /strip\.hasAttribute\(STRIP_MARK\)/);
 		assert.doesNotMatch(source, /querySelectorAll\(":scope div/, "descendant-div scans caused duplicate icons");
+	});
+
+	// Regression (v0.1.2 follow-up): a render crash used to abdicate the whole
+	// slot entry silently; the entry now carries its own error boundary that
+	// logs and degrades to a warning glyph.
+	it("wraps the assistant control in an error boundary", () => {
+		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.match(source, /class DeleteControlBoundary extends react\.Component/);
+		assert.match(source, /getDerivedStateFromError/);
 	});
 
 	it("inlines the official ic_ds_trash_outline_16 geometry", () => {

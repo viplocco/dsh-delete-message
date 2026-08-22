@@ -286,16 +286,21 @@ window.__ModuleLoader__.load({
 		/**
 		 * Read the chat node off a DOM element's React fiber and return its
 		 * durable identity. User/steering rows carry their node through
-		 * UserMessageNodeView with the seq at node.data.seq. Fails soft with
-		 * undefined — callers refuse rather than guess.
+		 * UserMessageNodeView with the seq at node.data.seq. As a side benefit,
+		 * any `sessionId` string seen on walked props feeds session-id capture
+		 * (slot components receive it through the standard kit). Fails soft
+		 * with undefined — callers refuse rather than guess.
 		 */
-		function seqFromFiber(element) {
+		function seqFromFiber(element, onSessionId) {
 			try {
 				const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
 				if (fiberKey === undefined) return undefined;
 				let fiber = element[fiberKey];
 				for (let hops = 0; fiber !== undefined && hops < 30; hops += 1, fiber = fiber.return) {
 					const props = fiber.memoizedProps;
+					if (typeof onSessionId === "function" && typeof props?.sessionId === "string") {
+						onSessionId(props.sessionId);
+					}
 					const node = props?.node;
 					if (node !== undefined && node !== null && typeof node === "object") {
 						const kind = node.kind ?? "";
@@ -549,14 +554,30 @@ window.__ModuleLoader__.load({
 		// ------------------------------------------------------------------
 
 		/**
+		 * The host's MessageIconActions strip is identifiable by its CSS-modules
+		 * token: every build composes it as "<hash>_actions" (+ a feature-level
+		 * "<hash>_actions"). Third-party wrappers that happen to sit inside a
+		 * message row (rewind triggers, portals) never carry such a token, which
+		 * is what keeps the enhancement from multiplying icons across them.
+		 */
+		const ACTIONS_TOKEN = /(?:^|\s)([\w$-]+_actions)(?:\s|$)/;
+
+		function looksLikeActionsStrip(el) {
+			return el.tagName === "DIV" && ACTIONS_TOKEN.test(typeof el.className === "string" ? el.className : "") && el.querySelector(":scope > button") !== null;
+		}
+
+		/**
 		 * Enhance ONE actions strip: the caller has already narrowed it to a
-		 * direct-child div of the hover root holding direct-child buttons, and
-		 * this guard keeps the work idempotent across observer batches. The
-		 * trash button borrows the copy button's live class list (box, padding,
-		 * radius, hover background, hover-reveal inheritance), uses the official
-		 * trash glyph, and gets NO native title — the shared bubble covers it.
+		 * direct-child div of the hover root carrying an `*_actions` class token,
+		 * and this guard keeps the work idempotent across observer batches. Any
+		 * stray trash copies from earlier runs inside THIS strip are removed
+		 * first (keep exactly one). The trash button borrows the copy button's
+		 * live class list (box, padding, radius, hover background, hover-reveal
+		 * inheritance), uses the official trash glyph, and gets NO native title
+		 * — the shared bubble covers it.
 		 */
 		function enhanceUserRow(strip, sessionIdOf, t) {
+			for (const stale of strip.querySelectorAll(":scope > button[data-dsh-delete-icon]")) stale.remove();
 			if (strip.hasAttribute(STRIP_MARK)) return;
 			const copyButton = strip.querySelector(":scope > button");
 			if (copyButton === null) return;
@@ -565,28 +586,36 @@ window.__ModuleLoader__.load({
 			trash.type = "button";
 			trash.className = copyButton.className;
 			trash.setAttribute("aria-label", t("deleteAria"));
+			trash.setAttribute("data-dsh-delete-icon", "");
 			trash.innerHTML = TRASH_SVG_HTML;
 			const disposeTooltip = attachTooltip(trash, () => t("delete"));
 
-			trash.addEventListener("click", async (event) => {
+			trash.addEventListener("click", (event) => {
 				event.stopPropagation();
-				const sessionId = sessionIdOf();
-				if (sessionId === undefined) {
-					window.alert(`${t("failed")}: ${t("reason.not-found")}`);
-					return;
-				}
-				const seq = seqFromFiber(trash);
-				if (typeof seq !== "number") {
-					console.warn("[delete-message] could not resolve seq for this user row; refusing to guess");
-					window.alert(`${t("failed")}: ${t("reason.not-found")}`);
-					return;
-				}
-				const outcome = await makeDeleteFlow(t)(sessionId, seq);
-				if (outcome?.ok) console.info("[delete-message] user message deleted (session %s seq %d)", sessionId, seq);
-				else if (outcome?.cancelled !== true && outcome?.error !== undefined) {
-					const reason = t(`reason.${outcome.error}`);
-					window.alert(`${t("failed")}: ${reason === `reason.${outcome.error}` ? outcome.error : reason}`);
-				}
+				void (async () => {
+					try {
+						const sessionId = sessionIdOf();
+						if (sessionId === undefined) {
+							window.alert(`${t("failed")}: ${t("reason.not-found")}`);
+							return;
+						}
+						const seq = seqFromFiber(trash, (id) => sessionIdOf.note(id));
+						if (typeof seq !== "number") {
+							console.warn("[delete-message] could not resolve seq for this user row; refusing to guess");
+							window.alert(`${t("failed")}: ${t("reason.not-found")}`);
+							return;
+						}
+						const outcome = await makeDeleteFlow(t)(sessionId, seq);
+						if (outcome?.ok) console.info("[delete-message] user message deleted (session %s seq %d)", sessionId, seq);
+						else if (outcome?.cancelled !== true && outcome?.error !== undefined) {
+							const reasonKey = `reason.${outcome.error}`;
+							const reason = t(reasonKey);
+							window.alert(`${t("failed")}: ${reason === reasonKey ? outcome.error : reason}`);
+						}
+					} catch (error) {
+						console.error("[delete-message] user-row delete flow crashed:", error);
+					}
+				})();
 			});
 
 			copyButton.after(trash);
@@ -598,15 +627,28 @@ window.__ModuleLoader__.load({
 		/**
 		 * Watch the transcript for user action rows. A qualifying row is a
 		 * `[data-time-hover-root]` that is neither a turn tail nor a pending
-		 * steering bubble; ITS ACTIONS STRIP is a DIRECT child div holding at
-		 * least one direct-child button (the copy button). Restricting both
-		 * steps to direct children is what guarantees one icon per row — nested
-		 * button-bearing divs (JSON-block headers inside bubbles) can never
-		 * qualify, and the strip mark makes repeat scans no-ops.
+		 * steering bubble; ITS ACTIONS STRIP is a DIRECT child div whose class
+		 * list carries the host's `*_actions` module token AND which holds at
+		 * least one direct-child button (the copy button). Class-token matching
+		 * is what excludes third-party wrappers injected into the same row —
+		 * plain "div with a button" once enhanced a rewind portal too, doubling
+		 * the icon. The strip mark makes repeat scans no-ops.
 		 */
 		function startDomEnhancement(sessionIdOf, t) {
 			const disposers = [];
+			let lastSweep = 0;
+			const sweepStrayIcons = (now) => {
+				if (now - lastSweep < 1500) return;
+				lastSweep = now;
+				for (const icon of document.querySelectorAll("button[data-dsh-delete-icon]")) {
+					const strip = icon.parentElement;
+					if (strip === null || !looksLikeActionsStrip(strip) || !strip.hasAttribute(STRIP_MARK)) {
+						icon.remove();
+					}
+				}
+			};
 			const observer = new MutationObserver((mutations) => {
+				sweepStrayIcons(Date.now());
 				for (const mutation of mutations) {
 					for (const node of mutation.addedNodes) {
 						if (!(node instanceof Element)) continue;
@@ -616,9 +658,8 @@ window.__ModuleLoader__.load({
 							if (el.hasAttribute("data-turn-tail")) continue;
 							if (el.hasAttribute("data-pending-steering")) continue;
 							for (const child of el.children) {
-								if (child.tagName !== "DIV") continue;
 								if (child.hasAttribute(STRIP_MARK)) continue;
-								if (child.querySelector(":scope > button") === null) continue;
+								if (!looksLikeActionsStrip(child)) continue;
 								const disposer = enhanceUserRow(child, sessionIdOf, t);
 								if (typeof disposer === "function") disposers.push(disposer);
 							}
@@ -638,22 +679,31 @@ window.__ModuleLoader__.load({
 		// apply — services injected by the client runtime.
 		// ------------------------------------------------------------------
 
-		/** Client-half services this bundle needs before it can register. */
-		const inject = ["slots", "locale", "sessions"];
+		/**
+		 * Client-half services this bundle needs before it can register.
+		 *
+		 * NO `sessions` here: requiring it hands the plugin a lazy accessor
+		 * that throws "cannot get required service sessions in inactive
+		 * context" on first touch. The current session id is captured instead —
+		 * assistant-slot renders report theirs, and the DOM path harvests any
+		 * `props.sessionId` seen while walking fibers.
+		 */
+		const inject = ["slots", "locale"];
 
 		/**
-		 * The sessions engine exposes its selection as `.selected`. The
-		 * assistant-slot components also report every session id they render
-		 * with, which covers any face drift between them.
+		 * Capture-only session-id source. Values arrive from two passive feeds:
+		 * every assistant-actions render notes its kit-provided sessionId, and
+		 * user-row fiber walks note whatever they pass through. No service is
+		 * ever resolved, so nothing can throw.
 		 */
-		function makeSessionIdSource(ctx) {
+		function makeSessionIdSource() {
 			let lastKnown;
 			return {
 				note(sessionId) {
 					if (typeof sessionId === "string") lastKnown = sessionId;
 				},
 				current() {
-					return ctx?.sessions?.selected ?? lastKnown;
+					return lastKnown;
 				}
 			};
 		}
@@ -676,64 +726,109 @@ window.__ModuleLoader__.load({
 				console.warn("[delete-message] locale.register failed; built-in strings stay:", error);
 			}
 
-			const sessionIds = makeSessionIdSource(ctx);
+			const sessionIds = makeSessionIdSource();
+
+			// Mirror the slot ledger's supervision seam into our log: if the
+			// assistant entry ever misbehaves, the crash reason lands in the
+			// console under our tag instead of vanishing into the boundary.
+			try {
+				if (typeof ctx.slots.onEntryError === "function") {
+					ctx.slots.onEntryError((slotKey, entry, error) => {
+						if (slotKey !== "conversation.chat.assistant-actions") return;
+						console.error("[delete-message] assistant-actions entry error:", error);
+					});
+				}
+			} catch (error) {
+				console.warn("[delete-message] onEntryError subscription failed:", error);
+			}
 
 			// Mount 1 — assistant messages (official slot).
 			try {
+				/**
+				 * Crash shield: a render error inside the control is logged and
+				 * downgraded to a small warning glyph, so the ENTRY ITSELF never
+				 * abdicates again (v0.1.1 lost the seat to a single jsx() typo and
+				 * looked exactly like "the button does not exist").
+				 */
+				class DeleteControlBoundary extends react.Component {
+					constructor(props) {
+						super(props);
+						this.state = { error: null };
+					}
+					static getDerivedStateFromError(error) {
+						return { error };
+					}
+					componentDidCatch(error, info) {
+						console.error("[delete-message] assistant control crashed (entry kept alive):", error, info?.componentStack ?? "");
+					}
+					render() {
+						if (this.state.error !== null) {
+							return jsx("span", { className: "dshdm-failure", role: "status", children: "⚠" });
+						}
+						return jsx(AssistantDeleteControl, this.props);
+					}
+				}
+
+				function AssistantDeleteControl(props) {
+					const { messageId, sessionId, useSession, t: translate } = props;
+					const t = typeof translate === "function" ? translate : translateWith(zh);
+					sessionIds.note(typeof sessionId === "string" ? sessionId : undefined);
+					// The standard kit provides useSession; substitute an inert hook
+					// ONLY if that ever changes, keeping hook order stable so a
+					// missing face degrades to a disabled button instead of a crash.
+					const safeUseSession = typeof useSession === "function" ? useSession : () => undefined;
+					const resolved = safeUseSession((snapshot) => findSeqByMessageId(snapshot, messageId));
+					const [busy, setBusy] = react.useState(false);
+					const [failure, setFailure] = react.useState(null);
+					const buttonRef = react.useRef(null);
+					// The shared DOM tooltip instead of the React Tooltip clone: one
+					// less moving part inside the slot entry, identical bubble.
+					react.useEffect(() => {
+						const el = buttonRef.current;
+						if (el === null) return undefined;
+						return attachTooltip(el, () => t("delete"));
+					}, [t]);
+
+					const onDelete = async () => {
+						if (typeof sessionId !== "string" || busy) return;
+						if (typeof resolved !== "number") {
+							setFailure(t("reason.not-found"));
+							return;
+						}
+						setBusy(true);
+						setFailure(null);
+						const outcome = await makeDeleteFlow(t)(sessionId, resolved);
+						setBusy(false);
+						if (outcome?.ok) console.info("[delete-message] assistant message deleted (session %s seq %d)", sessionId, resolved);
+						else if (outcome?.cancelled !== true && outcome?.error !== undefined) {
+							const reasonKey = `reason.${outcome.error}`;
+							const reason = t(reasonKey);
+							setFailure(reason === reasonKey ? outcome.error : reason);
+						}
+					};
+
+					const disabled = busy || typeof resolved !== "number";
+					return jsxs(react.Fragment, {
+						children: [
+							failure !== null && jsx("span", { className: "dshdm-failure", role: "status", children: failure }),
+							jsx("button", {
+								ref: buttonRef,
+								type: "button",
+								className: ACTION_CLASS,
+								"aria-label": t("deleteAria"),
+								disabled: disabled || undefined,
+								onClick: onDelete,
+								children: jsx(TrashGlyph, {})
+							})
+						]
+					});
+				}
+
 				ctx.slots.inject("conversation.chat.assistant-actions", () => {
 					console.info("[delete-message] conversation.chat.assistant-actions declared; registering");
 					return ctx.slots.register(
 						{ name: "conversation.chat.assistant-actions", id: "delete-message", order: 10, locale: NS },
-						function AssistantDeleteAction(props) {
-							const { messageId, sessionId, useSession, t: translate } = props;
-							const t = typeof translate === "function" ? translate : translateWith(zh);
-							sessionIds.note(typeof sessionId === "string" ? sessionId : undefined);
-							// The standard kit provides useSession; substitute an inert
-							// hook ONLY if that ever changes, keeping hook order stable
-							// so a missing face degrades to a disabled button instead of
-							// an entry crash (a crash would silently abdicate the seat).
-							const safeUseSession = typeof useSession === "function" ? useSession : () => undefined;
-							const resolved = safeUseSession((snapshot) => findSeqByMessageId(snapshot, messageId));
-							const [busy, setBusy] = react.useState(false);
-							const [failure, setFailure] = react.useState(null);
-
-							const onDelete = async () => {
-								if (typeof sessionId !== "string" || busy) return;
-								if (typeof resolved !== "number") {
-									setFailure(t("reason.not-found"));
-									return;
-								}
-								setBusy(true);
-								setFailure(null);
-								const outcome = await makeDeleteFlow(t)(sessionId, resolved);
-								setBusy(false);
-								if (outcome?.ok) console.info("[delete-message] assistant message deleted (session %s seq %d)", sessionId, resolved);
-								else if (outcome?.cancelled !== true && outcome?.error !== undefined) {
-									const reasonKey = `reason.${outcome.error}`;
-									const reason = t(reasonKey);
-									setFailure(reason === reasonKey ? outcome.error : reason);
-								}
-							};
-
-							const disabled = busy || typeof resolved !== "number";
-							return jsxs(react.Fragment, {
-								children: [
-									failure !== null && jsx("span", { className: "dshdm-failure", role: "status", children: failure }),
-									jsx(Tooltip, {
-										label: t("delete"),
-										side: "bottom",
-										children: jsx("button", {
-											type: "button",
-											className: ACTION_CLASS,
-											"aria-label": t("deleteAria"),
-											disabled: disabled || undefined,
-											onClick: onDelete,
-											children: jsx(TrashGlyph, {})
-										})
-									})
-								]
-							});
-						}
+						DeleteControlBoundary
 					);
 				});
 			} catch (error) {
@@ -755,6 +850,8 @@ window.__ModuleLoader__.load({
 			seqFromFiber,
 			enhanceUserRow,
 			startDomEnhancement,
+			looksLikeActionsStrip,
+			ACTIONS_TOKEN,
 			translateWith,
 			detectDomLocale,
 			Tooltip,
