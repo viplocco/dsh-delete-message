@@ -83,15 +83,19 @@
 
 ### 4.1 助手消息（官方槽位）
 
-注册 list 槽位 `conversation.chat.assistant-actions`（owner 传 `messageId`）。组件内：
+注册 list 槽位 `conversation.chat.assistant-actions`（owner 传 `messageId`；与官方 feedback 插件同座，注册项声明 `locale: NS` 换取真翻译器）。组件内：
 
-1. `useSession(selector)` 从会话快照解析 `messageId → 表面 seq`；
-2. 解析失败 → 按钮禁用（宁可禁用不可猜）；
-3. 点击 → `confirm()` 提示 → `POST /api/delete-message/delete` → 快照刷新自动反映占位行。
+1. `useSession(selector)` 从会话快照解析 `messageId → 表面 seq`（已钉死：settled 助手节点在 `data.finalNode.{messageId,seq}`，admitted steering 节点在 `data.messageId/data.seq`）；
+2. 解析失败 → 按钮禁用（宁可禁用不可猜）；`useSession` 面缺失时以惰性钩子替身保持 hook 顺序，降级为禁用而不是崩溃；
+3. 点击 → 复刻 Modal 的样式化确认弹窗 → `POST /api/delete-message/delete` → 快照刷新自动反映占位行。
+
+**v0.1.2 回归教训**：v0.1.1 在组件里写了单参 `jsx(TrashGlyph)`。宿主 React 18.3.1 对缺 props 的 `jsx()` 直接抛 `TypeError: Cannot convert undefined or null to object`——slot 错误边界捕获后**退位（abdicate）整个条目**，控制台一行 "slot entry crashed"，界面上就是"复制按钮右边永远没有删除按钮"。规则沉淀：手写 JSX-runtime 调用时每个 `jsx()/jsxs()` 必须带显式 props 对象；slot 条目渲染期宁可降级也不抛。
 
 ### 4.2 用户消息（DOM 增强，明确标注为过渡方案)
 
-宿主的用户消息行（`[data-time-hover-root]` 且非 `[data-turn-tail]`）内部操作条第一个按钮就是复制按钮。MutationObserver 在其后插入同款样式的垃圾桶按钮（借用相邻按钮 class，悬停显隐行为免费继承）。seq 通过 React fiber 从行节点读取（`__reactFiber$*` 上溯找 node props），读不到则拒绝执行并提示。
+宿主的用户消息行（`[data-time-hover-root]` 且非 `[data-turn-tail]`、非 `[data-pending-steering]`）内部操作条是**悬停根的直接子 div 且其直接子节点含按钮**（第一个即复制按钮）。MutationObserver 只认这一种形状并在其后插入同款样式的垃圾桶按钮（借用相邻按钮 class，28×28 盒型、内边距、圆角、悬停底色与悬停显隐全部免费继承）。seq 通过 React fiber 从行节点读取（`__reactFiber$*` 上溯找 node props），读不到则拒绝执行并提示。
+
+v0.1.2 收紧了两条防重复规则：**(a)** 候选条带只取悬停根的直接子 div（旧版 `:scope div` 会命中气泡内部任何含直接按钮的嵌套 div，如 JSON 块头部）；**(b)** 命中的条带立刻打 `data-dsh-delete-enhanced` 标记，重复扫描幂等。另外注入的按钮**不带原生 `title`**——Windows 的系统级提示框是白底黑边小方块，看起来正好像第二个"删除按钮"；悬停提示由复刻 primitives `Tooltip` 的共享气泡承担。
 
 升级路径：一旦宿主给用户消息提供对称槽位（或 `MessageIconActions` 把 `extraActions` 通到 user 侧），DOM 增强整体退役，两座桥合成一座。代码里 `startDomEnhancement` 单函数封装就是为了那一天整体摘除。
 
@@ -104,19 +108,27 @@
 
 安全：回环 socket 地址（观察值而非 Host 头）+ 本机 Host 头双条件；body 大小上限；错误带 stack 进 logger.error（HOST-CONTRACT § 5 的教训：吞掉的异常要长得像 bug）。
 
+### 5.1 v0.1.1 回归记录：占位消息必须带 `source`
+
+v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在追加点只校验 JSON 可序列化与表面合同（§2 表格所述），**不校验消息形状**；形状校验（`assertMessageEventShape`）只发生在持久化/查询边界。于是坏记录当场追加成功、静默落盘，会话下次冷加载时整体拒绝：`SessionPersistenceCorruptionError … message has invalid source`（实测 seq 23295，全日志仅此一条坏记录）。
+
+修复：`buildPlaceholder` 补上 `source: { kind: "user" }`——宿主全部第一方 user-message 生产者（headless、commands、session-title、plan-mode 等）都用这个词表。规则沉淀：**凡是往日志追加 `user/message`/`assistant/message`/`tool/result` 的插件，必须在追加点自带满足加载校验的完整消息形状**，不能指望 append 替你把关。
+
 ## 6. 集成验证清单（下一步，动真会话前逐项打勾）
 
 骨架阶段以下假设**标注在代码里**并需实测钉死：
 
-- [ ] `findSeqByMessageId` 的快照路径（`snapshot.chat.nodes/items` 形状）对照真实 ConversationSnapshot 校正；
+- [x] ~~`findSeqByMessageId` 的快照路径~~ —— v0.1.2 对照契约类型钉死：settled 助手节点 `data.finalNode.{messageId,seq}`、steering 节点 `data.messageId/data.seq`（`ChatConversationViewNode.data` 按 kind 载荷）；
 - [ ] DOM 增强：user 行识别选择器在真实 DOM（CSS modules hash 类名）下命中；fiber 上溯深度够到 node props；
-- [ ] 占位 `user/message` data 形状（`id/role/content` 的 ContentBlock 细节）对照真实日志事件确认；
+- [x] ~~占位 `user/message` data 形状对照真实日志事件确认~~ —— v0.1.1 以最疼的方式完成了这项验证（见 §5.1）：缺 `source` 导致整个会话历史加载失败；
 - [ ] 删除后浏览器快照推送是否触发转录重渲染（预期会；若否则补一个显式刷新动作）；
-- [ ] `sessionIdOf()`（DOM 路径取当前会话 id）接上运行时的实际 accessor；
+- [x] ~~`sessionIdOf()`（DOM 路径取当前会话 id）接上运行时的实际 accessor~~ —— v0.1.2 改为注入 `sessions` 服务读引擎的 `.selected`，并以助手槽组件渲染时上报的 sessionId 兜底（旧实现读未注入的 `ctx.sessions.selected` 恒为 undefined）；
 - [ ] 安装链路：本地 `link:` 或 Copy-Item 到 profile 安装副本 → `--dump-config` 出现 `# == dsh-delete-message` → `/plugins/dsh-delete-message/client.js` 200 → 重启宿主进程。
 
 ## 7. 版本路线
 
 - **v0.1**（本仓库当前）：单条删除（保守规则集）、确认流、占位替换、i18n（zh/en）、测试 39 例。
+- **v0.1.1**：占位补 `source: { kind: "user" }`（§5.1 回归修复），测试 40 例。
+- **v0.1.2**：UI 一致性修复——助手侧条目因单参 `jsx()` 崩溃被错误边界静默退位（按钮"消失"）改写为 feedback 同款注册形态；用户侧条带识别收紧到直接子级 + 幂等标记（消灭重复图标）；官方垃圾桶图标几何、28×28 操作钮样式值、Tooltip 复刻气泡、Modal+Button 复刻确认弹窗全面对齐宿主语言；DOM 路径会话 id 接 `sessions.selected`。测试 44 例 + 渲染冒烟（scripts/smoke-render.mjs，用宿主同款 React 18.3.1 真渲染 slot 组件）。
 - **v0.2**：成组删除（assistant tool_use + 其 result 一起 replace）、撤销（对占位再 append 一个反向引用？评估可行性）、删除前预检缓存与图标置灰。
 - **v1.0**：冷会话支持（fork-rebuild：inspect 全量 → 过滤 → 新会话 + 打开），若宿主届时提供原生编辑缝则迁移过去。

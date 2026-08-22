@@ -135,4 +135,40 @@ describe("browser half is one self-contained file", () => {
 		const source = readFileSync(`${root}src/client.js`, "utf8");
 		assert.match(source, /conversation\.chat\.assistant-actions/);
 	});
+
+	// Regression (v0.1.2): every jsx() call must carry a props object. The
+	// host's React 18.3.1 throws "Cannot convert undefined or null to object"
+	// on single-argument jsx(), which crashed the slot entry on first render;
+	// the error boundary then abdicated it and the delete button silently
+	// never appeared on assistant messages.
+	it("never calls jsx with a missing props object", () => {
+		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.match(source, /jsx\(TrashGlyph,\s*\{\}\)/, "single-arg jsx(TrashGlyph) crashes React 18");
+		assert.doesNotMatch(source, /jsx\(\s*[A-Za-z_$][\w$]*\s*\)/, "every jsx call needs an explicit props object");
+	});
+
+	// Regression (v0.1.2): native title tooltips render as an OS bordered box
+	// that reads as a second "delete button"; hover feedback must come from
+	// the shared bubble instead.
+	it("uses no native title tooltips and no window.confirm", () => {
+		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.doesNotMatch(source, /setAttribute\(\s*"title"/, "native title attributes are forbidden on injected controls");
+		assert.doesNotMatch(source, /\.title\s*=/, "native title attributes are forbidden on injected controls");
+		assert.doesNotMatch(source, /window\.confirm/, "confirmations go through the styled dialog replica");
+	});
+
+	// Regression (v0.1.2): the user-row mount anchors to a DIRECT child strip
+	// of the hover root and marks it, so nested strips (JSON-block headers)
+	// and repeat scans can never produce a second icon.
+	it("enhances at most one marked strip per row via direct-child anchoring", () => {
+		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.match(source, /STRIP_MARK\s*=\s*"data-dsh-delete-enhanced"/);
+		assert.match(source, /strip\.hasAttribute\(STRIP_MARK\)/);
+		assert.doesNotMatch(source, /querySelectorAll\(":scope div/, "descendant-div scans caused duplicate icons");
+	});
+
+	it("inlines the official ic_ds_trash_outline_16 geometry", () => {
+		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.match(source, /M14\.4782 4\.84067L14\.2138 10\.1152/, "trash glyph must be the official primitives path");
+	});
 });
