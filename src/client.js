@@ -255,17 +255,23 @@ window.__ModuleLoader__.load({
 		// ------------------------------------------------------------------
 		// Snapshot helpers — messageId/row → surface seq.
 		//
-		// Shapes pinned against the conversation contract types:
-		// snapshot.chat.nodes: readonly ChatConversationViewNode[] where a
-		// settled assistant node carries data.finalNode.{messageId,seq} and a
-		// steering node carries data.messageId/data.seq. Both helpers fail
-		// soft: unresolved seq disables the button rather than guessing.
+		// Shapes pinned against the conversation contract types (and against a
+		// live crash): ConversationSnapshot.chat is a ChatSnapshot whose `nodes`
+		// is a ChatNodeStore — a plain object with get(key)/values() — NOT an
+		// array; iterating it directly throws "nodes is not iterable". Settled
+		// assistant nodes carry data.finalNode.{messageId,seq}; steering nodes
+		// carry data.messageId/data.seq. Both helpers fail soft: unresolved seq
+		// disables the button rather than guessing.
 		// ------------------------------------------------------------------
 
 		/** Walk the chat snapshot looking for one message id's deletable node. */
 		function findSeqByMessageId(snapshot, messageId) {
 			if (snapshot === null || snapshot === undefined || messageId === undefined) return undefined;
-			const nodes = snapshot.chat?.nodes ?? [];
+			const store = snapshot.chat?.nodes;
+			let nodes;
+			if (Array.isArray(store)) nodes = store;
+			else if (store !== null && typeof store === "object" && typeof store.values === "function") nodes = store.values();
+			else return undefined;
 			for (const node of nodes) {
 				const data = node?.data;
 				if (data === null || typeof data !== "object") continue;
@@ -599,7 +605,13 @@ window.__ModuleLoader__.load({
 							window.alert(`${t("failed")}: ${t("reason.not-found")}`);
 							return;
 						}
-						const seq = seqFromFiber(trash, (id) => sessionIdOf.note(id));
+						// Resolve the row identity through a REACT-OWNED sibling: the
+						// injected trash never passed through React, so it carries no
+						// __reactFiber$ key and walking IT always came up empty. The
+						// copy button is re-queried at click time so the anchor can
+						// never go stale across host re-renders.
+						const fiberAnchor = strip.querySelector(":scope > button:not([data-dsh-delete-icon])");
+						const seq = seqFromFiber(fiberAnchor, (id) => sessionIdOf.note(id));
 						if (typeof seq !== "number") {
 							console.warn("[delete-message] could not resolve seq for this user row; refusing to guess");
 							window.alert(`${t("failed")}: ${t("reason.not-found")}`);
@@ -760,6 +772,14 @@ window.__ModuleLoader__.load({
 					}
 					componentDidCatch(error, info) {
 						console.error("[delete-message] assistant control crashed (entry kept alive):", error, info?.componentStack ?? "");
+					}
+					componentDidUpdate(prevProps) {
+						// Self-recovery: a transient crash (e.g. an unexpected snapshot
+						// shape mid-load) must not stick forever — retry the control
+						// whenever the target message changes.
+						if (this.state.error !== null && prevProps.messageId !== this.props.messageId) {
+							this.setState({ error: null });
+						}
 					}
 					render() {
 						if (this.state.error !== null) {

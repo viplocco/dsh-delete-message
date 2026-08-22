@@ -81,24 +81,30 @@ console.log("register options:", JSON.stringify(captured.options));
 if (captured.options?.locale !== registered.NS) throw new Error("registration must declare locale NS");
 
 // Render with the kit-shaped props. messageId resolves to seq 7 via the
-// assistant-step node's data.finalNode (the real ChatSnapshot shape).
+// assistant-step node's data.finalNode. The snapshot mirrors the REAL
+// ConversationSnapshot: chat.nodes is a ChatNodeStore (get/values), NOT an
+// array — iterating it directly once threw "nodes is not iterable".
+const chatNodes = [
+	{ key: "u1", kind: "user", data: { kind: "user", seq: 1, time: 0, content: [], source: {} } },
+	{
+		key: "a1",
+		kind: "assistant-step",
+		data: {
+			status: "settled",
+			turn: 1,
+			step: 1,
+			blocks: [],
+			time: 0,
+			finalNode: { kind: "assistant", seq: 7, messageId: "m-1" }
+		}
+	}
+];
 const snapshot = {
 	chat: {
-		nodes: [
-			{ key: "u1", kind: "user", data: { kind: "user", seq: 1, time: 0, content: [], source: {} } },
-			{
-				key: "a1",
-				kind: "assistant-step",
-				data: {
-					status: "settled",
-					turn: 1,
-					step: 1,
-					blocks: [],
-					time: 0,
-					finalNode: { kind: "assistant", seq: 7, messageId: "m-1" }
-				}
-			}
-		]
+		nodes: {
+			get: (key) => chatNodes.find((node) => node.key === key),
+			values: () => chatNodes
+		}
 	}
 };
 const useSession = (selector) => selector(snapshot);
@@ -129,7 +135,12 @@ eq(registered.findSeqByMessageId(null, "m-1"), undefined, "null snapshot fails s
 eq(
 	registered.findSeqByMessageId({ chat: { nodes: [{ data: { kind: "steering", messageId: "st-1", seq: 4 } }] } }, "st-1"),
 	4,
-	"steering nodes resolve via data.seq"
+	"plain-array nodes still resolve"
+);
+eq(
+	registered.findSeqByMessageId({ chat: { nodes: { noValuesHere: true } } }, "m-1"),
+	undefined,
+	"a non-iterable nodes store must fail soft, not throw (live regression)"
 );
 eq(registered.translateWith(registered.zh)("reason.open-turn"), "回合仍在进行中，暂不能删除", "zh reason lookup");
 eq(registered.detectDomLocale().length > 0, true, "dom locale heuristic returns something");

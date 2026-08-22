@@ -194,4 +194,22 @@ describe("browser half is one self-contained file", () => {
 		const source = readFileSync(`${root}src/client.js`, "utf8");
 		assert.match(source, /M14\.4782 4\.84067L14\.2138 10\.1152/, "trash glyph must be the official primitives path");
 	});
+
+	// Regression (v0.1.2 follow-up): ConversationSnapshot.chat.nodes is a
+	// ChatNodeStore (get/values object), NOT an array — iterating it directly
+	// threw "nodes is not iterable" on every render and the boundary showed a
+	// permanent ⚠ instead of the button.
+	it("reads chat nodes through the ChatNodeStore contract", () => {
+		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.match(source, /typeof store\.values === "function"/, "nodes must be read via values() when it is a store");
+		assert.doesNotMatch(source, /const nodes = snapshot\.chat\?\.nodes \?\? \[\];/, "the old array assumption must not return");
+	});
+
+	// Regression (v0.1.2 follow-up): the injected trash never passed through
+	// React and carries no __reactFiber$ key — row identity must come from a
+	// React-owned sibling button queried at click time.
+	it("resolves user-row seq from a react-owned sibling, not the injected icon", () => {
+		const source = readFileSync(`${root}src/client.js`, "utf8");
+		assert.match(source, /:scope > button:not\(\[data-dsh-delete-icon\]\)/);
+	});
 });

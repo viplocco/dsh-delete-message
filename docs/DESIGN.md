@@ -118,8 +118,8 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
 
 骨架阶段以下假设**标注在代码里**并需实测钉死：
 
-- [x] ~~`findSeqByMessageId` 的快照路径~~ —— v0.1.2 对照契约类型钉死：settled 助手节点 `data.finalNode.{messageId,seq}`、steering 节点 `data.messageId/data.seq`（`ChatConversationViewNode.data` 按 kind 载荷）；
-- [ ] DOM 增强：user 行识别选择器在真实 DOM（CSS modules hash 类名）下命中；fiber 上溯深度够到 node props；
+- [x] ~~`findSeqByMessageId` 的快照路径~~ —— 两步钉死：(1) 节点载荷——settled 助手节点 `data.finalNode.{messageId,seq}`、steering 节点 `data.messageId/data.seq`；(2) 容器形状——`ConversationSnapshot.chat.nodes` 是 **ChatNodeStore**（带 `get(key)/values()` 的普通对象），不是数组！直接 `for...of` 抛 `nodes is not iterable`，每个 turn-tail 渲染崩一次、边界只显示 ⚠（实测抓到）。终稿经 `values()` 读取并对裸数组保持兼容；
+- [x] ~~DOM 增强：user 行 seq 解析~~ —— 注入的垃圾桶按钮没经过 React，自身没有 `__reactFiber$` 键，从它上溯 fiber 永远落空（`could not resolve seq`）。终稿在点击时实时取操作条里第一个非本插件按钮（React 渲染的复制钮）作为 fiber 锚点；
   - v0.1.2 首版用"直接子 div 且含直接子按钮"判定，实测把第三方插件插进消息行的包装 div（如 ↩ 触发器的 portal）也当成了操作条 → 同一行出现第二个垃圾桶。终稿加 **`*_actions` CSS-modules 类名令牌**门槛（宿主操作条恒为 `<hash>_actions [<hash>_actions]`，第三方包装不带），另加节流清扫自愈残留图标；
 - [x] ~~助手侧按钮"消失"的最终防御~~ —— 除修复 jsx 单参崩溃外，v0.1.2 终稿给槽位组件套了**自有 ErrorBoundary**（渲染崩溃只打日志并降级为 ⚠ 字形，条目不再退位），订阅 `slots.onEntryError` 把崩溃原因带进我们的日志，并把条目内部的 React Tooltip 换成共享 DOM 气泡（少一层克隆机制）；
 - [x] ~~占位 `user/message` data 形状对照真实日志事件确认~~ —— v0.1.1 以最疼的方式完成了这项验证（见 §5.1）：缺 `source` 导致整个会话历史加载失败；
