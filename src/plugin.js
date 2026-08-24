@@ -33,7 +33,7 @@
  * @module dsh-delete-message/plugin
  */
 
-import { assessDeletion, buildPlaceholder, REFUSALS } from "./surface.js";
+import { assessDeletion, buildPlaceholder, planDeletion, REFUSALS, turnUnitCleared, userWindowOf } from "./surface.js";
 import { VERSION, registerRoutes } from "./http.js";
 
 export { VERSION };
@@ -69,22 +69,35 @@ export async function buildStatus(sessions, sessionId, seqParam) {
 	const session = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
 	if (session === undefined) return { ok: true, live: false, reason: "session-not-live" };
 	const seq = Number(seqParam);
-	const verdict = assessDeletion(session.events, seq);
+	const verdict = planDeletion(session.events, seq);
+	// Window chrome: ANY seq reports its user-input window and whether the
+	// whole unit is already deleted — that is how a client heals rows (tool/call
+	// summaries) that no surface replacement could ever cite. Because the
+	// window is bounded by real user inputs, no real user row can ever be
+	// covered by it.
+	const window = userWindowOf(session.events, seq);
+	const windowCleared = turnUnitCleared(session.events, window);
 	return {
 		ok: true,
 		live: true,
 		deletable: verdict.ok,
 		reason: verdict.ok ? undefined : verdict.reason,
+		mode: verdict.ok ? verdict.mode : undefined,
+		count: verdict.ok ? verdict.seqs.length : undefined,
+		window,
+		windowCleared,
 		version: VERSION
 	};
 }
 
 /**
- * Execute one deletion: re-check, then append the surface replace.
+ * Execute one deletion: re-plan, then append one replace per planned seq.
  *
- * POST re-runs the exact check the preflight served — the log may have grown
+ * POST re-runs the exact plan the preflight served — the log may have grown
  * between icon render and click (a turn finished, a tool result landed) — so
- * the UI can never talk the host into a delete it would refuse now.
+ * the UI can never talk the host into a delete it would refuse now. A turn
+ * target appends ONE placeholder per live member (assistant messages, their
+ * tool results, machine-injected context); user targets stay a single append.
  *
  * @param {any} sessions - the live SessionStore service.
  * @param {{ logger?: any }} loggerLike - logger face.
@@ -101,7 +114,7 @@ export async function deleteMessage(sessions, loggerLike, body) {
 	if (session === undefined) return { ok: false, error: REFUSALS.NOT_FOUND, detail: "session-not-live" };
 
 	const events = session.events;
-	const verdict = assessDeletion(events, seq);
+	const verdict = planDeletion(events, seq);
 	if (!verdict.ok) {
 		return { ok: false, error: verdict.reason };
 	}
@@ -110,20 +123,30 @@ export async function deleteMessage(sessions, loggerLike, body) {
 	// compaction ships summaries ("deriveMessages() then renders the summary as
 	// a user-role message"). One shape, one derivation rule, no new vocabulary.
 	const placeholderText = localeOf(loggerLike) === "zh" ? PLACEHOLDER_ZH : PLACEHOLDER_EN;
+	const appended = [];
 	try {
-		session.append(
-			"user/message",
-			buildPlaceholder(placeholderText),
-			{ surfaceOp: { op: "replace", start: seq, end: seq }, sourceEventSeqs: [seq] }
-		);
+		for (const target of verdict.seqs) {
+			session.append(
+				"user/message",
+				buildPlaceholder(placeholderText),
+				{ surfaceOp: { op: "replace", start: target, end: target }, sourceEventSeqs: [target] }
+			);
+			appended.push(target);
+		}
 	} catch (error) {
 		// Surface-contract violations throw at the append site by design. Log
 		// with stack — swallowed refusals cost days (HOST-CONTRACT § 5).
-		loggerLike?.logger?.error?.("delete-message: append rejected: %s", error?.stack ?? error);
-		return { ok: false, error: "append-rejected", detail: String(error?.message ?? error) };
+		loggerLike?.logger?.error?.(
+			"delete-message: append rejected after %d/%d: %s",
+			appended.length, verdict.seqs.length, error?.stack ?? error
+		);
+		return { ok: false, error: "append-rejected", detail: String(error?.message ?? error), replaced: appended };
 	}
-	loggerLike?.logger?.info?.("delete-message: session %s seq %d replaced", sessionId, seq);
-	return { ok: true, replaced: seq, version: VERSION };
+	loggerLike?.logger?.info?.(
+		"delete-message: session %s seq %d → %d node(s) replaced (%s)",
+		sessionId, seq, appended.length, verdict.mode
+	);
+	return { ok: true, replaced: appended, mode: verdict.mode, range: verdict.range, version: VERSION };
 }
 
 /**

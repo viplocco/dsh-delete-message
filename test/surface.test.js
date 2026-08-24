@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { assessDeletion, buildPlaceholder, hasToolUse, insideOpenTurn, REFUSALS } from "../src/surface.js";
+import { assessDeletion, buildPlaceholder, enclosingTurnBracket, hasToolUse, insideOpenTurn, planDeletion, REFUSALS } from "../src/surface.js";
 
 /** Event factory — only the fields the rules read. */
 function event(seq, type, extra = {}) {
@@ -146,5 +146,173 @@ describe("buildPlaceholder", () => {
 	it("carries a user source so the persisted event survives load validation", () => {
 		const placeholder = buildPlaceholder("[deleted]");
 		assert.deepEqual(placeholder.source, { kind: "user" });
+	});
+});
+
+/**
+ * A multi-step tool-call reply, bracketed [0..9], initiated by a REAL user
+ * input INSIDE the bracket (the shape real logs show — turn/start precedes
+ * the user's message):
+ *    0 turn/start
+ *    1 user input "run the checks"      ← window boundary
+ *    2 injected context (plugin source)
+ *    3 assistant message invoking a tool
+ *    4 tool/result
+ *    5 assistant narration text
+ *    6 assistant message invoking a second tool
+ *    7 tool/result
+ *    8 closing assistant prose          ← the delete click lands here
+ *    9 turn/end
+ * then an independent closed turn 10..12.
+ */
+function multiStepTurnLog() {
+	const append = (seq, type, extra = {}) => event(seq, type, { surfaceOp: "append", ...extra });
+	const asst = (seq, id, content) => append(seq, "assistant/message", { data: { message: { id, role: "assistant", source: { kind: "model", provider: "p", model: "m" }, content } } });
+	return [
+		append(0, "turn/start"),
+		append(1, "user/message", { data: { id: "u1", role: "user", source: { kind: "user" }, content: [{ type: "text", text: "run the checks" }] } }),
+		append(2, "user/message", { data: { id: "ctx-1", role: "user", source: { kind: "plugin" }, content: [] } }),
+		asst(3, "a1", [{ type: "tool_use", id: "t1" }]),
+		append(4, "tool/result", { data: { message: { id: "r1", role: "user", source: { kind: "tool", callId: "t1" }, content: [{ type: "tool-result", toolCallId: "t1", content: [] }] } } }),
+		asst(5, "a2", [{ type: "text", text: "narration" }]),
+		asst(6, "a3", [{ type: "tool_use", id: "t2" }]),
+		append(7, "tool/result", { data: { message: { id: "r2", role: "user", source: { kind: "tool", callId: "t2" }, content: [{ type: "tool-result", toolCallId: "t2", content: [] }] } } }),
+		asst(8, "a4", [{ type: "text", text: "final answer" }]),
+		append(9, "turn/end"),
+		append(10, "turn/start"),
+		append(11, "user/message", { data: { id: "u2", role: "user", source: { kind: "user" }, content: [] } }),
+		append(12, "turn/end")
+	];
+}
+
+describe("planDeletion (user-input windows)", () => {
+	it("expands an assistant target to the whole live window between user inputs", () => {
+		const verdict = planDeletion(multiStepTurnLog(), 8);
+		assert.deepEqual(verdict, {
+			ok: true,
+			mode: "turn",
+			seqs: [2, 3, 4, 5, 6, 7, 8],
+			range: { start: 1, end: 11 }
+		});
+	});
+
+	it("never covers the initiating user row — its seq is a window bound", () => {
+		const verdict = planDeletion(multiStepTurnLog(), 8);
+		assert.equal(verdict.seqs.includes(1), false);
+		assert.equal(planCoversLike(verdict.range, 1), false);
+		assert.equal(planCoversLike(verdict.range, 11), false);
+	});
+
+	it("includes machine-injected context in the unit", () => {
+		const verdict = planDeletion(multiStepTurnLog(), 8);
+		assert.equal(verdict.seqs.includes(2), true);
+	});
+
+	it("keeps single semantics for a USER-message target", () => {
+		assert.deepEqual(planDeletion(multiStepTurnLog(), 1), { ok: true, mode: "single", seqs: [1] });
+	});
+
+	it("cleans up a partially deleted reply on re-click (skips shadowed members)", () => {
+		const events = [
+			...multiStepTurnLog(),
+			{
+				seq: 13,
+				type: "user/message",
+				surfaceOp: { op: "replace", start: 8, end: 8 },
+				sourceEventSeqs: [8],
+				data: { id: "deleted-x", role: "user", source: { kind: "user" }, content: [] }
+			}
+		];
+		// The closing node is already shadowed; assessDeletion refuses it, but
+		// the plan still removes every remaining live member of the window.
+		assert.deepEqual(planDeletion(events, 8), {
+			ok: true,
+			mode: "turn",
+			seqs: [2, 3, 4, 5, 6, 7],
+			range: { start: 1, end: 11 }
+		});
+	});
+
+	it("refuses when every window member is already shadowed", () => {
+		const base = multiStepTurnLog();
+		const extra = [];
+		for (const seq of [2, 3, 4, 5, 6, 7, 8]) {
+			extra.push({
+				seq: 20 + seq,
+				type: "user/message",
+				surfaceOp: { op: "replace", start: seq, end: seq },
+				sourceEventSeqs: [seq],
+				data: { id: `deleted-${seq}`, role: "user", source: { kind: "user" }, content: [] }
+			});
+		}
+		assert.deepEqual(planDeletion([...base, ...extra], 8), { ok: false, reason: REFUSALS.ALREADY_SHADOWED });
+	});
+
+	it("refuses an open turn", () => {
+		const events = [...multiStepTurnLog(), event(13, "turn/start"), event(14, "user/message", { surfaceOp: "append" })];
+		// Target inside the NEW open bracket → open-turn refusal.
+		assert.deepEqual(planDeletion(events, 14), { ok: false, reason: REFUSALS.OPEN_TURN });
+		// An assistant node in that open bracket is refused the same way.
+		const events2 = [...events, event(15, "assistant/message", { surfaceOp: "append", data: { message: { id: "a9", role: "assistant", source: { kind: "model", provider: "p", model: "m" }, content: [{ type: "text" }] } } })];
+		assert.deepEqual(planDeletion(events2, 15), { ok: false, reason: REFUSALS.OPEN_TURN });
+		// Earlier CLOSED replies stay plannable even while a later one runs.
+		assert.equal(planDeletion(events, 8).ok, true);
+	});
+
+	it("steering splits the window: each side is its own unit", () => {
+		const append = (seq, type, extra = {}) => event(seq, type, { surfaceOp: "append", ...extra });
+		const asst = (seq, id, content) => append(seq, "assistant/message", { data: { message: { id, role: "assistant", source: { kind: "model", provider: "p", model: "m" }, content } } });
+		const events = [
+			append(0, "turn/start"),
+			append(1, "user/message", { data: { id: "u1", role: "user", source: { kind: "user" }, content: [] } }),
+			append(2, "user/message", { data: { id: "ctx", role: "user", source: { kind: "plugin" }, content: [] } }),
+			asst(3, "a1", [{ type: "text", text: "working" }]),
+			append(4, "tool/result", { data: { message: { id: "r1", role: "user", source: { kind: "tool", callId: "t1" }, content: [] } } }),
+			asst(5, "a2", [{ type: "text", text: "narration" }]),
+			append(6, "user/message", { data: { id: "steer", role: "user", source: { kind: "user" }, content: [{ type: "text", text: "focus!" }] } }),
+			asst(7, "a3", [{ type: "text", text: "final answer" }]),
+			append(8, "turn/end"),
+			append(9, "turn/start"),
+			append(10, "user/message", { data: { id: "u2", role: "user", source: { kind: "user" }, content: [] } }),
+			append(11, "turn/end")
+		];
+		// Deleting the post-steering closing prose covers ONLY (6, 10).
+		const after = planDeletion(events, 7);
+		assert.deepEqual(after.seqs, [7]);
+		assert.deepEqual(after.range, { start: 6, end: 10 });
+		assert.equal(after.seqs.includes(6), false);
+		// Deleting the pre-steering part covers (1, 6) and leaves the steering
+		// word itself untouched.
+		const before = planDeletion(events, 5);
+		assert.deepEqual(before.seqs, [2, 3, 4, 5]);
+		assert.deepEqual(before.range, { start: 1, end: 6 });
+		assert.equal(before.seqs.includes(6), false);
+	});
+
+	it("falls back to single semantics for standalone nodes outside any bracket", () => {
+		const events = [
+			event(0, "session/title"),
+			event(1, "user/message", { surfaceOp: "append", data: { id: "solo", role: "user", source: { kind: "user" }, content: [] } })
+		];
+		assert.deepEqual(planDeletion(events, 1), { ok: true, mode: "single", seqs: [1] });
+	});
+});
+
+/** Local mirror of the client's exclusive-bound window test. */
+function planCoversLike(range, seq) {
+	if (typeof seq !== "number") return false;
+	return (range.start === null || seq > range.start) && (range.end === null || seq < range.end);
+}
+
+describe("enclosingTurnBracket", () => {
+	it("finds the bracket and its end", () => {
+		assert.deepEqual(enclosingTurnBracket(multiStepTurnLog(), 5), { start: 0, end: 9, open: false });
+	});
+	it("reports an unclosed bracket as open", () => {
+		const events = [event(0, "turn/start"), event(1, "user/message")];
+		assert.deepEqual(enclosingTurnBracket(events, 1), { start: 0, open: true });
+	});
+	it("is undefined before any bracket", () => {
+		assert.equal(enclosingTurnBracket([event(5, "session/title")], 5), undefined);
 	});
 });

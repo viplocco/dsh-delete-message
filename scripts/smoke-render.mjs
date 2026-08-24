@@ -143,6 +143,31 @@ eq(
 	"a non-iterable nodes store must fail soft, not throw (live regression)"
 );
 eq(registered.translateWith(registered.zh)("reason.open-turn"), "回合仍在进行中，暂不能删除", "zh reason lookup");
+eq(registered.translateWith(registered.zh)("reason.already-shadowed"), "这条消息已被删除", "flat zh reason lookup");
+if (typeof registered.zh["reason.already-shadowed"] !== "string") throw new Error("reason keys must be FLAT dotted strings (host LocaleRuntime does one-level lookup only)");
+// Role-aware confirm bodies must exist in both dictionaries — runDelete picks
+// one of these by the calling mount's static role.
+for (const [dict, name] of [[registered.zh, "zh"], [registered.en, "en"]]) {
+	for (const key of ["confirmBodyUser", "confirmBodyAssistant", "confirmBody"]) {
+		if (typeof dict[key] !== "string") throw new Error(`${name}.${key} missing`);
+	}
+}
+// Ledger round-trip over a stubbed localStorage.
+const ledgetStore = new Map();
+globalThis.window.localStorage = {
+	getItem: (key) => (ledgetStore.has(key) ? ledgetStore.get(key) : null),
+	setItem: (key, value) => ledgetStore.set(key, String(value)),
+	removeItem: (key) => ledgetStore.delete(key)
+};
+registered.ledgerMark("s-ledger", 42);
+registered.ledgerMark("s-ledger", 43);
+if (!registered.ledgerHas("s-ledger", 42) || !registered.ledgerHas("s-ledger", 43)) throw new Error("ledger round-trip failed");
+// v2 persistence shape: { s: exact seqs, r: turn ranges } — NOT the plain
+// array v1 wrote (that assertion broke when ranges landed).
+const persisted = JSON.parse(ledgetStore.get(`${registered.LEDGER_PREFIX}s-ledger`));
+if (!persisted || !Array.isArray(persisted.s) || persisted.s.join(",") !== "42,43" || !Array.isArray(persisted.r)) {
+	throw new Error("ledger persistence malformed");
+}
 eq(registered.detectDomLocale().length > 0, true, "dom locale heuristic returns something");
 
 console.log("SMOKE OK — assistant slot renders without crashing; seq resolution contract holds");

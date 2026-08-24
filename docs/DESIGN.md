@@ -40,12 +40,21 @@
 | 层面 | 结果 |
 | --- | --- |
 | 模型上下文 | `deriveMessages()` 不再投影被遮蔽节点 ✔ |
-| 可见转录 | 表面重写后该位置显示占位行"[此消息已被用户删除]" ✔ |
+| 可见转录 | 宿主**不会**移除原行（见下）——视觉隐藏由插件客户端完成 ✔ |
 | 持久日志 | append-only，原始字节完整保留，可审计可恢复 ✔ |
 | 下游投影 | SQLite 投影 / checkpoint / fork lineage 全部按正常追加处理，零破坏 ✔ |
 | 升级安全 | 与 `/compact` 同一公开契约，不碰私有文件格式 ✔ |
 
 这是宿主自己删历史的方式。我们只是把它的触发者从 token 压力换成了用户的一次点击。
+
+### 可见转录的真相（v0.1.2 误判，实测钉死）
+
+设计定稿时以为"转录中该位置显示占位行"。**错。** 宿主客户端构建人类转录时只收 **append-origin 表面事件**（`dsh-client-runtime` surface.ts：*"a landed replacement would erase conversation the user already saw"*——已落地的替换不能抹掉用户已经看到的话；替换副本仅进模型上下文）。因此：
+
+- 落地 replace 后，原消息行**永远留在界面上**，占位行**永远不渲染**；
+- 服务端删除（模型上下文）照常生效，但"界面消失"必须插件自己做。
+
+终稿方案（v0.1.3）：每会话已删 seq 台账（localStorage 持久化）+ 清扫器解析 `[data-chat-flow-key]` 行包装器的 fiber 身份（user/steering/context→`data.seq`，assistant-step→`data.finalNode.seq`，turn-tail→`data.closing.finalNode.seq`）并隐藏命中行；成功删除立即隐藏，未知历史行用一次 `GET /status` 预检治愈（`already-shadowed` 即入账）。
 
 ### 为什么不是别的路（被否决的）
 
@@ -62,7 +71,7 @@
    - 只能截断"之后所有"，不能删中间一条；且产生新 sessionId。作为 v2 的"深度清除"（连同日志一起丢弃的 fork-rebuild）候选保留。
 
 4. **只做前端隐藏**（插件自维护已删清单 + CSS 隐藏）
-   - 模型上下文纹丝不动——需求里"从上下文中删除"完全不成立。否决。
+   - 模型上下文纹丝不动——需求里"从上下文中删除"完全不成立。**单独使用否决**；但 v0.1.3 起作为服务端 replace 的**互补层**采纳：replace 管上下文，前端隐藏管视觉（见上节）。
 
 ## 3. 可删除性规则（v0.1 保守集）
 
@@ -87,7 +96,7 @@
 
 1. `useSession(selector)` 从会话快照解析 `messageId → 表面 seq`（已钉死：settled 助手节点在 `data.finalNode.{messageId,seq}`，admitted steering 节点在 `data.messageId/data.seq`）；
 2. 解析失败 → 按钮禁用（宁可禁用不可猜）；`useSession` 面缺失时以惰性钩子替身保持 hook 顺序，降级为禁用而不是崩溃；
-3. 点击 → 复刻 Modal 的样式化确认弹窗 → `POST /api/delete-message/delete` → 快照刷新自动反映占位行。
+3. 点击 → 复刻 Modal 的样式化确认弹窗（正文按本挂载点的静态角色自动选型，见 §4.3）→ `POST /api/delete-message/delete` → 成功即 `hideRowsBySeq`（台账入账 + 立即隐藏对应行）；失败以样式化通知弹窗显示本地化原因。
 
 **v0.1.2 回归教训**：v0.1.1 在组件里写了单参 `jsx(TrashGlyph)`。宿主 React 18.3.1 对缺 props 的 `jsx()` 直接抛 `TypeError: Cannot convert undefined or null to object`——slot 错误边界捕获后**退位（abdicate）整个条目**，控制台一行 "slot entry crashed"，界面上就是"复制按钮右边永远没有删除按钮"。规则沉淀：手写 JSX-runtime 调用时每个 `jsx()/jsxs()` 必须带显式 props 对象；slot 条目渲染期宁可降级也不抛。
 
@@ -98,6 +107,17 @@
 v0.1.2 收紧了两条防重复规则：**(a)** 候选条带只取悬停根的直接子 div（旧版 `:scope div` 会命中气泡内部任何含直接按钮的嵌套 div，如 JSON 块头部）；**(b)** 命中的条带立刻打 `data-dsh-delete-enhanced` 标记，重复扫描幂等。另外注入的按钮**不带原生 `title`**——Windows 的系统级提示框是白底黑边小方块，看起来正好像第二个"删除按钮"；悬停提示由复刻 primitives `Tooltip` 的共享气泡承担。
 
 升级路径：一旦宿主给用户消息提供对称槽位（或 `MessageIconActions` 把 `extraActions` 通到 user 侧），DOM 增强整体退役，两座桥合成一座。代码里 `startDomEnhancement` 单函数封装就是为了那一天整体摘除。
+
+### 4.3 确认文案的角色自动判定
+
+早期确认弹窗正文是一句合并文案："……若为助手回复，其思考、工具调用与注入上下文会一并移除……"——把分支判断推给了用户。实际上**每个挂载点的角色是静态事实**，根本不需要判断：
+
+| 挂载点 | 角色（静态） | 文案键 | 陈述的实际范围 |
+| --- | --- | --- | --- |
+| 官方槽位（只在助手回复的操作行渲染） | `assistant` | `confirmBodyAssistant` | 整段回复单元：思考、工具调用、注入上下文 |
+| DOM 增强（只匹配用户行） | `user` | `confirmBodyUser` | 单条消息本身 |
+
+`makeDeleteFlow(t)` 返回的 `runDelete(sessionId, seq, role)` 第三个参数携带的就是这条静态知识——零运行时探测。它与宿主端 `planDeletion` 的语义分叉一一对应：user 目标 `mode:"single"` 仅替换该节点；assistant 目标 `mode:"turn"` 替换整个用户输入窗口（各步回复、tool/result、机器注入上下文）。原 `confirmBody` 保留为未知角色的兜底键。
 
 ## 5. Host API
 
@@ -123,7 +143,7 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
   - v0.1.2 首版用"直接子 div 且含直接子按钮"判定，实测把第三方插件插进消息行的包装 div（如 ↩ 触发器的 portal）也当成了操作条 → 同一行出现第二个垃圾桶。终稿加 **`*_actions` CSS-modules 类名令牌**门槛（宿主操作条恒为 `<hash>_actions [<hash>_actions]`，第三方包装不带），另加节流清扫自愈残留图标；
 - [x] ~~助手侧按钮"消失"的最终防御~~ —— 除修复 jsx 单参崩溃外，v0.1.2 终稿给槽位组件套了**自有 ErrorBoundary**（渲染崩溃只打日志并降级为 ⚠ 字形，条目不再退位），订阅 `slots.onEntryError` 把崩溃原因带进我们的日志，并把条目内部的 React Tooltip 换成共享 DOM 气泡（少一层克隆机制）；
 - [x] ~~占位 `user/message` data 形状对照真实日志事件确认~~ —— v0.1.1 以最疼的方式完成了这项验证（见 §5.1）：缺 `source` 导致整个会话历史加载失败；
-- [ ] 删除后浏览器快照推送是否触发转录重渲染（预期会；若否则补一个显式刷新动作）；
+- [x] ~~删除后浏览器快照推送是否触发转录重渲染~~ —— 问题本身问错了：宿主转录**按设计只由 append-origin 事件构成**，replace 既不移除原行也不渲染占位行（见 §2"可见转录的真相"）。视觉消失由插件客户端台账 + 清扫器实现，不依赖任何刷新动作；
 - [x] ~~`sessionIdOf()`（DOM 路径取当前会话 id）接上运行时的实际 accessor~~ —— v0.1.2 首版注入 `sessions` 服务实测翻车：插件 fiber 拿到的是惰性取值器，一访问就抛 `cannot get required service "sessions" in inactive context`（点击时成为未捕获拒绝）。终稿改为**纯被动捕获**：助手槽组件渲染时上报 kit 的 `sessionId`，DOM 路径在 fiber 上溯时顺手收集 `props.sessionId`——不 resolve 任何服务，无从抛错；
 - [ ] 安装链路：本地 `link:` 或 Copy-Item 到 profile 安装副本 → `--dump-config` 出现 `# == dsh-delete-message` → `/plugins/dsh-delete-message/client.js` 200 → 重启宿主进程。
 
@@ -132,5 +152,10 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
 - **v0.1**（本仓库当前）：单条删除（保守规则集）、确认流、占位替换、i18n（zh/en）、测试 39 例。
 - **v0.1.1**：占位补 `source: { kind: "user" }`（§5.1 回归修复），测试 40 例。
 - **v0.1.2**：UI 一致性修复——助手侧条目因单参 `jsx()` 崩溃被错误边界静默退位（按钮"消失"）改写为 feedback 同款注册形态；用户侧条带识别收紧到直接子级 + 幂等标记（消灭重复图标）；官方垃圾桶图标几何、28×28 操作钮样式值、Tooltip 复刻气泡、Modal+Button 复刻确认弹窗全面对齐宿主语言；DOM 路径会话 id 接 `sessions.selected`。测试 44 例 + 渲染冒烟（scripts/smoke-render.mjs，用宿主同款 React 18.3.1 真渲染 slot 组件）。
+- **v0.1.3**（工作区已改，未发版）：三个实测回归的修复——
+  1. **删除后界面不消失**（§2 真相节）：宿主转录只收 append-origin 事件，replace 不动界面。新增客户端隐藏层：每会话已删 seq 台账（localStorage，上限 400）+ `[data-chat-flow-key]` 行清扫器（fiber 解析行身份，覆盖 user/steering/context/assistant-step/turn-tail 五种节点）+ `/status` 预检治愈历史行；成功删除立即隐藏。
+  2. **失败原因显示原始错误码**（如字面 "already-shadowed"）：宿主 `LocaleRuntime.lookup` 只做一层键查找，嵌套 `reason: {}` 永远查不中。词典改扁平点号键，`translateWith` 先平查再逐级走。
+  3. **用户行点击直接弹原生 alert**：点击处理器先查被动捕获的会话 id、后跑 fiber——页面重载后捕获为空时没找就拒绝。改为先解析（多锚点：条带内宿主按钮 → 行包装器探测链）并顺带喂捕获，再校验；所有拒绝/失败统一走复刻 Modal 的通知弹窗，原生 alert 全部退役。
+  4. **确认文案按角色自动判定 + 英文全量润色**（§4.3）：`runDelete` 增加静态 `role` 参数，词典拆出 `confirmBodyUser/confirmBodyAssistant`，"若为助手回复"条件句退役；英文 UI 文案整轮完善（`noticeOk` "Got it"→"Dismiss"，全部 `reason.*` 改完整陈述句并统一标点）。冒烟脚本同步两处：台账断言从 v1 裸数组修正为 v2 `{s,r}` 形状（v0.1.3 第 1 项落地时的漏网旧断言），新增角色化文案键的存在性检查。
 - **v0.2**：成组删除（assistant tool_use + 其 result 一起 replace）、撤销（对占位再 append 一个反向引用？评估可行性）、删除前预检缓存与图标置灰。
 - **v1.0**：冷会话支持（fork-rebuild：inspect 全量 → 过滤 → 新会话 + 打开），若宿主届时提供原生编辑缝则迁移过去。

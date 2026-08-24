@@ -50,11 +50,25 @@
  *
  * ## Deletion UX
  *
- * Click trash → styled confirm dialog stating the message will be removed
- * from the history record AND the model context → POST
- * `/api/delete-message/delete` → the session snapshot refreshes and the
- * transcript shows the placeholder row. A refusal surfaces the host's reason
- * code as localized copy.
+ * Click trash → styled confirm dialog whose body is picked by the mount's
+ * STATIC role — the user-row copy states the single-message scope, the
+ * assistant-row copy names the whole reply unit (thinking, tool calls,
+ * injected context) — then POST `/api/delete-message/delete`. A refusal
+ * opens a styled notice carrying the localized reason — raw machine codes
+ * never reach the screen.
+ *
+ * ## Why visual removal is ours, not the host's
+ *
+ * The host builds the human transcript from APPEND-origin surface events BY
+ * DESIGN (client-runtime surface.ts: "a landed replacement would erase
+ * conversation the user already saw"). A landed surface replace therefore
+ * keeps the original rows visible forever, and the placeholder itself never
+ * renders. So after a successful delete THIS plugin hides the rows: a
+ * per-session seq ledger (localStorage) feeds a sweeper over the chat's
+ * `[data-chat-flow-key]` node wrappers, resolving every row's seq through
+ * React fibers exactly like the user-row mount. Rows deleted before this
+ * browser knew (another tab, another day) are healed by one `/status`
+ * preflight per unresolved row: `already-shadowed` marks the ledger too.
  *
  * ## This half loading proves nothing about the other one
  *
@@ -85,44 +99,59 @@ window.__ModuleLoader__.load({
 		const BUBBLE_CLASS = "dshdm-bubble";
 		const STRIP_MARK = "data-dsh-delete-enhanced";
 
-		/** Localized copy. Keys mirror the refusal codes the host returns. */
+		/**
+		 * Localized copy. Keys mirror the refusal codes the host returns.
+		 *
+		 * FLAT DOTTED KEYS, deliberately: the host LocaleRuntime looks a key up
+		 * as `dicts[ns][locale][key]` with NO nested-path walking, so v0.1.2's
+		 * nested `reason: { ... }` object made every `reason.*` lookup fall
+		 * back to the raw code — the UI literally showed "already-shadowed".
+		 */
 		const zh = {
 			delete: "删除",
 			deleteAria: "删除这条消息",
 			confirmTitle: "删除这条消息？",
+			// Role-aware confirm bodies. Each mount knows its row kind statically
+			// (assistant slot vs user-row enhancement), so runDelete picks the
+			// key from the role argument — the user never has to parse a
+			// conditional "if this is an assistant reply" sentence.
+			confirmBodyUser: "将从会话记录和模型上下文中删除这条消息；原始日志保留，可恢复。",
+			confirmBodyAssistant: "将删除这条回复及其思考、工具调用与注入的上下文；原始日志保留，可恢复。",
+			// Fallback for an unknown role (defensive; both call sites pass one).
 			confirmBody: "将从历史记录和模型上下文中删除这条消息（日志原文保留，可恢复）。",
 			cancel: "取消",
 			close: "关闭",
+			noticeOk: "知道了",
 			deleted: "已删除",
 			failed: "删除失败",
-			reason: {
-				"not-found": "找不到该会话或消息（会话可能未在宿主中打开）",
-				"not-surface-type": "该记录类型不支持删除",
-				"already-shadowed": "这条消息已被删除",
-				"has-tool-calls": "工具调用消息暂不支持单独删除",
-				"open-turn": "回合仍在进行中，暂不能删除",
-				"append-rejected": "宿主拒绝了本次修改",
-				internal: "内部错误"
-			}
+			"reason.not-found": "找不到该会话或消息（会话可能未在宿主中打开）",
+			"reason.not-surface-type": "该记录类型不支持删除",
+			"reason.already-shadowed": "这条消息已被删除",
+			"reason.has-tool-calls": "工具调用消息暂不支持单独删除",
+			"reason.open-turn": "回合仍在进行中，暂不能删除",
+			"reason.append-rejected": "宿主拒绝了本次修改",
+			"reason.internal": "内部错误"
 		};
 		const en = {
 			delete: "Delete",
 			deleteAria: "Delete this message",
 			confirmTitle: "Delete this message?",
-			confirmBody: "It will be removed from the history record and the model context (the raw log is kept for recovery).",
+			confirmBodyUser: "This message will be removed from the conversation and the model context; the raw log is kept for recovery.",
+			confirmBodyAssistant: "This reply will be removed together with its thinking, tool calls, and injected context; the raw log is kept for recovery.",
+			// Fallback for an unknown role (defensive; both call sites pass one).
+			confirmBody: "This message will be removed from the conversation and the model context (the raw log is kept for recovery).",
 			cancel: "Cancel",
 			close: "Close",
+			noticeOk: "Dismiss",
 			deleted: "Deleted",
 			failed: "Delete failed",
-			reason: {
-				"not-found": "Session or message not found (is the session open in the host?)",
-				"not-surface-type": "This record type cannot be deleted",
-				"already-shadowed": "This message is already deleted",
-				"has-tool-calls": "Tool-call messages cannot be deleted individually yet",
-				"open-turn": "The turn is still running; try again when it finishes",
-				"append-rejected": "The host rejected the change",
-				internal: "Internal error"
-			}
+			"reason.not-found": "Message or session not found. Make sure the session is open.",
+			"reason.not-surface-type": "This type of record cannot be deleted.",
+			"reason.already-shadowed": "This message has already been deleted.",
+			"reason.has-tool-calls": "Messages with tool calls cannot be deleted individually yet.",
+			"reason.open-turn": "This turn is still in progress. Try again once it finishes.",
+			"reason.append-rejected": "The host rejected this change.",
+			"reason.internal": "Internal error."
 		};
 
 		/**
@@ -147,9 +176,13 @@ window.__ModuleLoader__.load({
 		/** Minimal translator over the registered dictionaries. */
 		function translateWith(dictionary) {
 			return (key, params) => {
-				const parts = key.split(".");
-				let value = dictionary;
-				for (const part of parts) value = value?.[part];
+				// Flat hit first — parity with the host LocaleRuntime's one-level
+				// lookup — then the dotted-path walk for nested shapes.
+				let value = dictionary[key];
+				if (typeof value !== "string") {
+					value = dictionary;
+					for (const part of key.split(".")) value = value?.[part];
+				}
 				if (typeof value !== "string") return key;
 				if (params === undefined) return value;
 				return value.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole));
@@ -218,6 +251,7 @@ window.__ModuleLoader__.load({
 .dshdm-btn-outline:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dshdm-btn-primary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}
 .dshdm-btn-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
+[data-dsh-delete-hidden]{display:none!important}
 `;
 
 		function injectStyleOnce() {
@@ -302,11 +336,13 @@ window.__ModuleLoader__.load({
 				const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
 				if (fiberKey === undefined) return undefined;
 				let fiber = element[fiberKey];
-				for (let hops = 0; fiber !== undefined && hops < 30; hops += 1, fiber = fiber.return) {
+				for (let hops = 0; fiber !== undefined && hops < 50; hops += 1, fiber = fiber.return) {
 					const props = fiber.memoizedProps;
-					if (typeof onSessionId === "function" && typeof props?.sessionId === "string") {
-						onSessionId(props.sessionId);
-					}
+					// Resolve the row identity BEFORE the passive session-id feed:
+					// the node-carrying fiber is the payoff, and a throwing feed must
+					// never abort the walk (v0.1.3 passed a getter-only function where
+					// `.note()` was expected, so the first sessionId-carrying fiber
+					// TypeError'd and the row came back unresolved → "not found").
 					const node = props?.node;
 					if (node !== undefined && node !== null && typeof node === "object") {
 						const kind = node.kind ?? "";
@@ -315,11 +351,396 @@ window.__ModuleLoader__.load({
 							if (typeof seq === "number") return seq;
 						}
 					}
+					if (typeof onSessionId === "function" && typeof props?.sessionId === "string") {
+						try {
+							onSessionId(props.sessionId);
+						} catch {
+							// Best-effort capture; never let it derail identity resolution.
+						}
+					}
 				}
 			} catch {
 				// Fiber layout changed; fall through to the refusal below.
 			}
 			return undefined;
+		}
+
+		// ------------------------------------------------------------------
+		// Visual removal — the transcript-side counterpart of a landed
+		// surface replace. The host keeps append-origin rows visible by
+		// design, so hiding deleted rows is entirely this plugin's job.
+		//
+		// Identity: every chat node renders inside a ChatNodeSeat wrapper
+		// carrying [data-chat-anchor-key]/[data-chat-flow-key]; probing any
+		// React-owned element inside it and walking fibers reaches the view
+		// component whose props.node names the row kind and seq:
+		//   user/steering/context → data.seq
+		//   assistant-step        → data.finalNode.seq
+		//   turn-tail             → data.closing.finalNode.seq
+		// Ledger: per-session deleted-seq set persisted in localStorage so
+		// hides survive reloads. Healing: rows whose ledger state is unknown
+		// get ONE /status preflight — `already-shadowed` marks the ledger,
+		// which is how rows deleted in another tab or before install vanish
+		// here too.
+		// ------------------------------------------------------------------
+
+		const HIDDEN_MARK = "data-dsh-delete-hidden";
+		const LEDGER_PREFIX = "dsh-delete-message:deleted:v2:";
+		const LEDGER_CAP = 400;
+		const rowSeqCache = new WeakMap();
+		const preflightTried = new WeakSet();
+
+		/** querySelectorAll that survives minimal DOM stubs (smoke harness). */
+		function safeQueryAll(root, selector) {
+			try {
+				return Array.from((root ?? document).querySelectorAll(selector));
+			} catch {
+				return [];
+			}
+		}
+
+		/**
+		 * Read one chat-node identity off ANY React-owned element inside a
+		 * row. Extends {@link seqFromFiber} with the assistant/turn-tail/
+		 * context kinds the hider needs; user/steering behavior is identical.
+		 */
+		function resolveRowSeq(element, onSessionId) {
+			try {
+				const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+				if (fiberKey === undefined) return undefined;
+				let fiber = element[fiberKey];
+				for (let hops = 0; fiber !== undefined && hops < 60; hops += 1, fiber = fiber.return) {
+					const props = fiber.memoizedProps;
+					const node = props?.node;
+					if (node !== undefined && node !== null && typeof node === "object") {
+						const data = node.data;
+						switch (node.kind ?? "") {
+							case "user":
+							case "steering":
+							case "context":
+								if (typeof data?.seq === "number") return data.seq;
+								break;
+							case "assistant":
+							case "assistant-step":
+								if (typeof data?.finalNode?.seq === "number") return data.finalNode.seq;
+								break;
+							case "turn-tail":
+								if (typeof data?.closing?.finalNode?.seq === "number") return data.closing.finalNode.seq;
+								break;
+							case "tool-call":
+							case "model-retry":
+								// These rows are chrome over NON-surface events; their
+								// identity is the node's top-level anchorSeq (present on
+								// every chat node kind), not anything inside data.
+								if (typeof node.anchorSeq === "number") return node.anchorSeq;
+								break;
+							default:
+								break;
+						}
+					}
+					if (typeof onSessionId === "function" && typeof props?.sessionId === "string") {
+						try {
+							onSessionId(props.sessionId);
+						} catch {
+							// Best-effort capture; never let it derail identity resolution.
+						}
+					}
+				}
+			} catch {
+				// Fiber layout changed; the caller treats this as unresolved.
+			}
+			return undefined;
+		}
+
+		/**
+		 * Probe candidates inside one flow-item wrapper, best-first: the hover
+		 * root's first button (user rows + turn tails), the hover root itself,
+		 * then direct element children of the wrapper (assistant-step nodes
+		 * render NO wrapper div — the flow-item's children ARE the markdown
+		 * elements whose fibers lead to AssistantNodeView).
+		 */
+		function probeElementsFor(wrapper) {
+			const probes = [];
+			if (!(wrapper instanceof Element)) return probes;
+			const hover = wrapper.querySelector("[data-time-hover-root]");
+			if (hover !== null) {
+				const button = hover.querySelector("button");
+				if (button !== null) probes.push(button);
+				probes.push(hover);
+			}
+			// Try the first few direct element children — for assistant-step and
+			// similar rows the flow-item div has no hover root and its children
+			// are the content elements directly rendered by the node view.
+			for (const child of wrapper.children) {
+				if (probes.length >= 6) break;
+				if (child instanceof Element) probes.push(child);
+			}
+			return probes;
+		}
+
+		/** Resolve a flow-item wrapper's surface seq via its probe chain. */
+		function resolveWrapperSeq(wrapper, onSessionId) {
+			for (const probe of probeElementsFor(wrapper)) {
+				const seq = resolveRowSeq(probe, onSessionId);
+				if (typeof seq === "number") return seq;
+			}
+			return undefined;
+		}
+
+		/**
+		 * Per-session deletion ledger, version 2: exact deleted seqs PLUS whole
+		 * turn ranges. A range is what hides rows that no surface replacement
+		 * could ever cite — tool/call summary nodes anchor at non-surface
+		 * events inside the turn. Old plain-array values are still readable.
+		 */
+		const ledgerMemory = new Map();
+		function ledgerFor(sessionId) {
+			let entry = ledgerMemory.get(sessionId);
+			if (entry === undefined) {
+				entry = { seqs: new Set(), ranges: [] };
+				try {
+					const raw = window.localStorage.getItem(LEDGER_PREFIX + sessionId);
+					if (raw !== null) {
+						const parsed = JSON.parse(raw);
+						if (Array.isArray(parsed)) {
+							for (const value of parsed) if (Number.isSafeInteger(value)) entry.seqs.add(value);
+						} else if (parsed !== null && typeof parsed === "object") {
+							for (const value of Array.isArray(parsed.s) ? parsed.s : []) {
+								if (Number.isSafeInteger(value)) entry.seqs.add(value);
+							}
+							for (const pair of Array.isArray(parsed.r) ? parsed.r : []) {
+								const start = Array.isArray(pair) ? pair[0] : undefined;
+								const end = Array.isArray(pair) ? pair[1] : undefined;
+								const okStart = start === null || Number.isSafeInteger(start);
+								const okEnd = end === null || Number.isSafeInteger(end);
+								if (okStart && okEnd && (start !== null || end !== null)) {
+									entry.ranges.push({ start, end });
+								}
+							}
+						}
+					}
+				} catch {
+					// Storage unavailable (privacy mode, stubbed window) — the
+					// in-memory entry still covers this page's lifetime.
+				}
+				ledgerMemory.set(sessionId, entry);
+			}
+			return entry;
+		}
+		function persistLedger(sessionId, entry) {
+			try {
+				window.localStorage.setItem(
+					LEDGER_PREFIX + sessionId,
+					JSON.stringify({
+						s: [...entry.seqs].slice(-LEDGER_CAP),
+						r: entry.ranges.slice(-64).map((range) => [range.start, range.end])
+					})
+				);
+			} catch {
+				// Same fallback as read: page-lifetime only.
+			}
+		}
+		function ledgerHas(sessionId, seq) {
+			const entry = ledgerFor(sessionId);
+			if (entry.seqs.has(seq)) return true;
+			return entry.ranges.some((range) => seq >= range.start && seq <= range.end);
+		}
+		function ledgerMark(sessionId, seq) {
+			const entry = ledgerFor(sessionId);
+			entry.seqs.add(seq);
+			persistLedger(sessionId, entry);
+		}
+		function ledgerMarkRange(sessionId, range) {
+			if (!range || (range.start === null && range.end === null)) return;
+			const start = Number.isSafeInteger(range.start) ? range.start : null;
+			const end = Number.isSafeInteger(range.end) ? range.end : null;
+			if (start === null && end === null) return;
+			const entry = ledgerFor(sessionId);
+			// Absorb into an existing fully-bounded overlapping range when possible.
+			let absorbed = false;
+			if (start !== null && end !== null) {
+				for (const existing of entry.ranges) {
+					if (existing.start !== null && existing.end !== null && start <= existing.end && end >= existing.start) {
+						existing.start = Math.min(existing.start, start);
+						existing.end = Math.max(existing.end, end);
+						absorbed = true;
+						break;
+					}
+				}
+			}
+			if (!absorbed) entry.ranges.push({ start, end });
+			persistLedger(sessionId, entry);
+		}
+
+		/** Normalize one seq or a list into a clean number array. */
+		function asSeqList(seqOrSeqs) {
+			if (typeof seqOrSeqs === "number") return [seqOrSeqs];
+			return Array.isArray(seqOrSeqs) ? seqOrSeqs.filter((value) => typeof value === "number") : [];
+		}
+
+		/** Extract the replaced-seq list from a delete response (array, number, or fallback). */
+		function replacedSeqsOf(outcome, fallback) {
+			const list = asSeqList(outcome?.replaced);
+			if (list.length > 0) return list;
+			return typeof fallback === "number" ? [fallback] : [];
+		}
+
+		/**
+		 * Normalize a hide request into `{ seqs: Set<number>, ranges: [] }`.
+		 * Accepts a number, a list, a `{seqs,ranges}` plan, or a delete outcome
+		 * shape (`{replaced, mode, range}`).
+		 */
+		function asPlan(input) {
+			if (input !== null && typeof input === "object" && !Array.isArray(input)) {
+				const seqs = new Set(asSeqList(input.seqs ?? input.replaced));
+				const ranges = [];
+				const rawRanges = Array.isArray(input.ranges) ? input.ranges : input.range !== undefined ? [input.range] : [];
+				for (const range of rawRanges) {
+					if (range !== null && typeof range === "object") {
+						const start = Number.isSafeInteger(range.start) ? range.start : null;
+						const end = Number.isSafeInteger(range.end) ? range.end : null;
+						if (start !== null || end !== null) ranges.push({ start, end });
+					}
+				}
+				return { seqs, ranges };
+			}
+			return { seqs: new Set(asSeqList(input)), ranges: [] };
+		}
+
+		/**
+		 * Whether a resolved/anchored seq is covered by the plan's exact set or
+		 * any window. Window bounds are the REAL user inputs themselves and are
+		 * EXCLUSIVE — a user row's own seq can never be covered even on code
+		 * paths that cannot see node kinds.
+		 */
+		function planCovers(plan, seq) {
+			if (typeof seq !== "number") return false;
+			if (plan.seqs.has(seq)) return true;
+			return plan.ranges.some((range) =>
+				(range.start === null || seq > range.start) && (range.end === null || seq < range.end)
+			);
+		}
+
+		/**
+		 * Record successful deletes and hide every rendered row they cover,
+		 * right now — instant feedback, independent of any observer timing.
+		 */
+		function hideRowsBySeq(sessionId, planInput) {
+			if (typeof sessionId !== "string") return;
+			const plan = asPlan(planInput);
+			if (plan.seqs.size === 0 && plan.ranges.length === 0) return;
+			for (const seq of plan.seqs) ledgerMark(sessionId, seq);
+			for (const range of plan.ranges) ledgerMarkRange(sessionId, range);
+			for (const wrapper of safeQueryAll(document, "[data-chat-flow-key]")) {
+				let resolved = rowSeqCache.get(wrapper);
+				// Never trust a cached placeholder — a failed early resolution must
+				// not block the authoritative post-delete sweep.
+				if (typeof resolved !== "number") {
+					resolved = resolveWrapperSeq(wrapper, () => {});
+					if (typeof resolved === "number") rowSeqCache.set(wrapper, resolved);
+				}
+				if (planCovers(plan, resolved)) wrapper.setAttribute(HIDDEN_MARK, "");
+			}
+		}
+
+		/**
+		 * Hide every wrapper whose ChatNode identity is covered by the plan by
+		 * reading the session snapshot directly and matching
+		 * {@link data-chat-anchor-key} — zero fiber walks. A node matches when
+		 * ANY of its identities (top-level anchorSeq — present on every chat
+		 * node kind, including tool/call summaries — or the per-kind data
+		 * fields) is covered. Range coverage skips user/steering kinds so real
+		 * user steering words inside the turn survive a turn deletion.
+		 */
+		function hideRowsForSeqViaChatNodes(sessionId, planInput, snapshot) {
+			if (typeof sessionId !== "string" || snapshot === null || snapshot === undefined) return;
+			const plan = asPlan(planInput);
+			if (plan.seqs.size === 0 && plan.ranges.length === 0) return;
+			for (const seq of plan.seqs) ledgerMark(sessionId, seq);
+			for (const range of plan.ranges) ledgerMarkRange(sessionId, range);
+			const keys = new Set();
+			let nodeCount = 0;
+			for (const node of snapshot.chat?.nodes?.values() ?? []) {
+				nodeCount += 1;
+				if (node === null || typeof node !== "object") continue;
+				const data = node.data;
+				const identities = [
+					node.anchorSeq,
+					data?.finalNode?.seq,
+					data?.closing?.finalNode?.seq,
+					data?.seq
+				].filter((value) => typeof value === "number");
+				const hit = identities.some((value) => plan.seqs.has(value)) ||
+					(node.kind !== "user" && node.kind !== "steering" && identities.some((value) => planCovers(plan, value)));
+				if (hit) keys.add(node.key);
+			}
+			let matched = 0;
+			for (const wrapper of safeQueryAll(document, "[data-chat-flow-key]")) {
+				const anchor = wrapper.getAttribute("data-chat-anchor-key");
+				if (anchor !== null && keys.has(anchor)) {
+					wrapper.setAttribute(HIDDEN_MARK, "");
+					matched += 1;
+				}
+			}
+			// Diagnostic breadcrumb on the document root: planned size, matched
+			// chat nodes, matched DOM wrappers, and the total wrapper count.
+			try {
+				document.documentElement.setAttribute(
+					"data-dshdm-last-hide",
+					`seqs=${plan.seqs.size} ranges=${plan.ranges.length} keys=${keys.size}/${nodeCount} wrappers=${matched}`
+				);
+			} catch {}
+		}
+
+		/**
+		 * One sweeper unit over a `[data-chat-flow-key]` wrapper: resolve its
+		 * seq once, hide it when the ledger knows better, else preflight once
+		 * to heal rows deleted outside this browser's knowledge. Safe to call
+		 * repeatedly; every expensive step is cached per element.
+		 */
+		function processFlowItem(wrapper, source) {
+			if (!(wrapper instanceof Element) || wrapper.hasAttribute(HIDDEN_MARK)) return;
+			const sessionId = source.current();
+			if (typeof sessionId !== "string") return; // capture pending — later sweeps retry
+			let seq = rowSeqCache.get(wrapper);
+			if (seq === undefined && !rowSeqCache.has(wrapper)) {
+				const resolved = resolveWrapperSeq(wrapper, (id) => source.note(id));
+				// Only cache a successful resolution: a failed early sweep must
+				// leave the wrapper retryable for hideRowsBySeq and later sweeps.
+				if (typeof resolved === "number") {
+					seq = resolved;
+					rowSeqCache.set(wrapper, seq);
+				}
+			}
+			if (typeof seq !== "number") return;
+			if (ledgerHas(sessionId, seq)) {
+				wrapper.setAttribute(HIDDEN_MARK, "");
+				return;
+			}
+			if (!preflightTried.has(wrapper)) {
+				preflightTried.add(wrapper);
+				void preflight(sessionId, seq)
+					.then((status) => {
+						if (status?.live !== true) return;
+						if (status.reason === "already-shadowed") {
+							ledgerMark(sessionId, seq);
+							if (wrapper.isConnected) wrapper.setAttribute(HIDDEN_MARK, "");
+						} else if (status.windowCleared === true && status.window !== undefined) {
+							// The whole reply unit is deleted server-side; this row is
+							// stale chrome (a tool/call summary) anchored inside the
+							// user-input window. Record the window so reloads hide it
+							// without a server round trip, and hide it now. Windows are
+							// bounded by real user inputs, so this can never cover a
+							// real user row.
+							ledgerMarkRange(sessionId, status.window);
+							if (wrapper.isConnected) wrapper.setAttribute(HIDDEN_MARK, "");
+						}
+					})
+					.catch(() => {
+						// Preflight unreachable or refused — leave the row alone;
+						// the click path remains authoritative.
+					});
+			}
 		}
 
 		// ------------------------------------------------------------------
@@ -453,49 +874,58 @@ window.__ModuleLoader__.load({
 		}
 
 		// ------------------------------------------------------------------
-		// Confirm dialog — a plain-DOM replica of the primitives Modal +
-		// Button pair (the same structure RiskConfirmation composes): blurred
-		// mask, 380px card, header with close glyph, description, footer with
-		// outline-cancel + primary-confirm. Escape / mask / close all cancel.
-		// Resolves true only on confirm.
+		// Dialogs — plain-DOM replicas of the primitives Modal + Button pair
+		// (the same structure RiskConfirmation composes): blurred mask, 380px
+		// card, header with close glyph, description, footer buttons.
+		// openConfirmDialog = outline-cancel + primary-confirm (Escape / mask
+		// / close all cancel). openNoticeDialog = single primary button; it
+		// replaces window.alert everywhere — a native alert was exactly the
+		// "wrong dialog" the user reported on the user-row path.
 		// ------------------------------------------------------------------
 
+		function buildModalCard({ title, description, closeLabel }) {
+			const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+			const root = document.createElement("div");
+			root.className = "dshdm-modal-root";
+			root.setAttribute("role", "presentation");
+
+			const mask = document.createElement("div");
+			mask.className = "dshdm-modal-mask";
+			mask.setAttribute("aria-hidden", "true");
+
+			const dialog = document.createElement("div");
+			dialog.className = "dshdm-modal-dialog";
+			dialog.setAttribute("role", "dialog");
+			dialog.setAttribute("aria-modal", "true");
+			dialog.setAttribute("aria-label", title);
+
+			const header = document.createElement("div");
+			header.className = "dshdm-modal-header";
+			const heading = document.createElement("h2");
+			heading.className = "dshdm-modal-title";
+			heading.textContent = title;
+			const closeButton = document.createElement("button");
+			closeButton.type = "button";
+			closeButton.className = "dshdm-modal-close";
+			closeButton.setAttribute("aria-label", closeLabel);
+			closeButton.innerHTML =
+				'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+				CLOSE_PATHS.map((d) => `<path d="${d}" fill="currentColor"/>`).join("") +
+				"</svg>";
+			header.append(heading, closeButton);
+
+			const body = document.createElement("p");
+			body.className = "dshdm-modal-description";
+			body.textContent = description;
+
+			dialog.append(header, body);
+			root.append(mask, dialog);
+			return { opener, root, mask, dialog, closeButton };
+		}
+
 		function openConfirmDialog({ title, description, confirmLabel, cancelLabel, closeLabel }) {
+			const card = buildModalCard({ title, description, closeLabel });
 			return new Promise((resolve) => {
-				const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-				const root = document.createElement("div");
-				root.className = "dshdm-modal-root";
-				root.setAttribute("role", "presentation");
-
-				const mask = document.createElement("div");
-				mask.className = "dshdm-modal-mask";
-				mask.setAttribute("aria-hidden", "true");
-
-				const dialog = document.createElement("div");
-				dialog.className = "dshdm-modal-dialog";
-				dialog.setAttribute("role", "dialog");
-				dialog.setAttribute("aria-modal", "true");
-				dialog.setAttribute("aria-label", title);
-
-				const header = document.createElement("div");
-				header.className = "dshdm-modal-header";
-				const heading = document.createElement("h2");
-				heading.className = "dshdm-modal-title";
-				heading.textContent = title;
-				const closeButton = document.createElement("button");
-				closeButton.type = "button";
-				closeButton.className = "dshdm-modal-close";
-				closeButton.setAttribute("aria-label", closeLabel);
-				closeButton.innerHTML =
-					'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
-					CLOSE_PATHS.map((d) => `<path d="${d}" fill="currentColor"/>`).join("") +
-					"</svg>";
-				header.append(heading, closeButton);
-
-				const body = document.createElement("p");
-				body.className = "dshdm-modal-description";
-				body.textContent = description;
-
 				const footer = document.createElement("div");
 				footer.className = "dshdm-modal-footer";
 				const cancelButton = document.createElement("button");
@@ -507,39 +937,76 @@ window.__ModuleLoader__.load({
 				confirmButton.className = "dshdm-btn dshdm-btn-primary";
 				confirmButton.textContent = confirmLabel;
 				footer.append(cancelButton, confirmButton);
-
-				dialog.append(header, body, footer);
-				root.append(mask, dialog);
+				card.dialog.append(footer);
 
 				const finish = (answer) => {
 					document.removeEventListener("keydown", onKeyDown, true);
-					root.remove();
-					opener?.focus?.();
+					card.root.remove();
+					card.opener?.focus?.();
 					resolve(answer);
 				};
 				const onKeyDown = (event) => {
 					if (event.key === "Escape") finish(false);
 				};
 
-				mask.addEventListener("click", () => finish(false));
-				closeButton.addEventListener("click", () => finish(false));
+				card.mask.addEventListener("click", () => finish(false));
+				card.closeButton.addEventListener("click", () => finish(false));
 				cancelButton.addEventListener("click", () => finish(false));
 				confirmButton.addEventListener("click", () => finish(true));
 				document.addEventListener("keydown", onKeyDown, true);
 
-				document.body.appendChild(root);
+				document.body.appendChild(card.root);
 				confirmButton.focus();
 			});
 		}
 
+		/** Single-button modal notice. Resolves once dismissed. */
+		function openNoticeDialog({ title, description, okLabel, closeLabel }) {
+			const card = buildModalCard({ title, description, closeLabel });
+			return new Promise((resolve) => {
+				const footer = document.createElement("div");
+				footer.className = "dshdm-modal-footer";
+				const okButton = document.createElement("button");
+				okButton.type = "button";
+				okButton.className = "dshdm-btn dshdm-btn-primary";
+				okButton.textContent = okLabel;
+				footer.append(okButton);
+				card.dialog.append(footer);
+
+				const finish = () => {
+					document.removeEventListener("keydown", onKeyDown, true);
+					card.root.remove();
+					card.opener?.focus?.();
+					resolve(true);
+				};
+				const onKeyDown = (event) => {
+					if (event.key === "Escape") finish();
+				};
+
+				card.mask.addEventListener("click", finish);
+				card.closeButton.addEventListener("click", finish);
+				okButton.addEventListener("click", finish);
+				document.addEventListener("keydown", onKeyDown, true);
+
+				document.body.appendChild(card.root);
+				okButton.focus();
+			});
+		}
+
 		// ------------------------------------------------------------------
-		// Shared confirm-then-delete flow used by both mounts.
+		// Shared confirm-then-delete flow used by both mounts. The `role`
+		// argument ("user" | "assistant") is STATIC knowledge of the calling
+		// mount — the assistant slot only renders on assistant replies, the
+		// DOM enhancement only on user rows — so the confirm body states the
+		// actual scope for that role instead of hedging with "if this is an
+		// assistant reply".
 		// ------------------------------------------------------------------
 		function makeDeleteFlow(t) {
-			return async function runDelete(sessionId, seq) {
+			return async function runDelete(sessionId, seq, role) {
+				const bodyKey = role === "assistant" ? "confirmBodyAssistant" : role === "user" ? "confirmBodyUser" : "confirmBody";
 				const confirmed = await openConfirmDialog({
 					title: t("confirmTitle"),
-					description: t("confirmBody"),
+					description: t(bodyKey),
 					confirmLabel: t("delete"),
 					cancelLabel: t("cancel"),
 					closeLabel: t("close")
@@ -549,7 +1016,12 @@ window.__ModuleLoader__.load({
 					return await requestDelete(sessionId, seq);
 				} catch (error) {
 					console.error("[delete-message] delete failed:", error);
-					window.alert(`${t("failed")}: internal`);
+					void openNoticeDialog({
+						title: t("failed"),
+						description: t("reason.internal"),
+						okLabel: t("noticeOk"),
+						closeLabel: t("close")
+					});
 					return { ok: false };
 				}
 			};
@@ -582,11 +1054,16 @@ window.__ModuleLoader__.load({
 		 * inheritance), uses the official trash glyph, and gets NO native title
 		 * — the shared bubble covers it.
 		 */
-		function enhanceUserRow(strip, sessionIdOf, t) {
+		function enhanceUserRow(strip, source, t) {
 			for (const stale of strip.querySelectorAll(":scope > button[data-dsh-delete-icon]")) stale.remove();
 			if (strip.hasAttribute(STRIP_MARK)) return;
 			const copyButton = strip.querySelector(":scope > button");
 			if (copyButton === null) return;
+
+			// Passive identity capture at mount: one fiber walk over the host
+			// button feeds any props.sessionId into the shared source BEFORE
+			// any click, so the first click on a fresh page already has it.
+			seqFromFiber(copyButton, (id) => source.note(id));
 
 			const trash = document.createElement("button");
 			trash.type = "button";
@@ -600,29 +1077,53 @@ window.__ModuleLoader__.load({
 				event.stopPropagation();
 				void (async () => {
 					try {
-						const sessionId = sessionIdOf();
-						if (sessionId === undefined) {
-							window.alert(`${t("failed")}: ${t("reason.not-found")}`);
+						// Identity FIRST, refusal SECOND. The fiber walk doubles as
+						// the passive sessionId feed; v0.1.2 checked the captured id
+						// before walking and could alert without ever having looked.
+						const anchors = [];
+						const hostButton = strip.querySelector(":scope > button:not([data-dsh-delete-icon])");
+						if (hostButton !== null) anchors.push(hostButton);
+						const wrapper = strip.closest("[data-chat-flow-key]");
+						if (wrapper !== null) anchors.push(...probeElementsFor(wrapper));
+						let seq;
+						for (const anchor of anchors) {
+							const resolved = seqFromFiber(anchor, (id) => source.note(id));
+							if (typeof resolved === "number") {
+								seq = resolved;
+								break;
+							}
+						}
+						const sessionId = source.current();
+						if (typeof seq !== "number" || typeof sessionId !== "string") {
+							console.warn("[delete-message] user row identity unresolved; refusing to guess");
+							void openNoticeDialog({
+								title: t("failed"),
+								description: t("reason.not-found"),
+								okLabel: t("noticeOk"),
+								closeLabel: t("close")
+							});
 							return;
 						}
-						// Resolve the row identity through a REACT-OWNED sibling: the
-						// injected trash never passed through React, so it carries no
-						// __reactFiber$ key and walking IT always came up empty. The
-						// copy button is re-queried at click time so the anchor can
-						// never go stale across host re-renders.
-						const fiberAnchor = strip.querySelector(":scope > button:not([data-dsh-delete-icon])");
-						const seq = seqFromFiber(fiberAnchor, (id) => sessionIdOf.note(id));
-						if (typeof seq !== "number") {
-							console.warn("[delete-message] could not resolve seq for this user row; refusing to guess");
-							window.alert(`${t("failed")}: ${t("reason.not-found")}`);
-							return;
-						}
-						const outcome = await makeDeleteFlow(t)(sessionId, seq);
-						if (outcome?.ok) console.info("[delete-message] user message deleted (session %s seq %d)", sessionId, seq);
-						else if (outcome?.cancelled !== true && outcome?.error !== undefined) {
+						const outcome = await makeDeleteFlow(t)(sessionId, seq, "user");
+						if (outcome?.ok) {
+							const seqs = replacedSeqsOf(outcome, seq);
+							console.info("[delete-message] message(s) deleted (session %s, %d node(s))", sessionId, seqs.length);
+							hideRowsBySeq(sessionId, seqs);
+						} else if (outcome?.error === "already-shadowed") {
+							// The server already replaced this node (a prior delete landed
+							// but the row was never hidden). That IS a successful delete —
+							// hide it like one, do not surface a failure dialog.
+							console.info("[delete-message] user seq %d already shadowed; hiding row (session %s)", seq, sessionId);
+							hideRowsBySeq(sessionId, [seq]);
+						} else if (outcome?.cancelled !== true && outcome?.error !== undefined) {
 							const reasonKey = `reason.${outcome.error}`;
 							const reason = t(reasonKey);
-							window.alert(`${t("failed")}: ${reason === reasonKey ? outcome.error : reason}`);
+							void openNoticeDialog({
+								title: t("failed"),
+								description: reason === reasonKey ? outcome.error : reason,
+								okLabel: t("noticeOk"),
+								closeLabel: t("close")
+							});
 						}
 					} catch (error) {
 						console.error("[delete-message] user-row delete flow crashed:", error);
@@ -646,24 +1147,41 @@ window.__ModuleLoader__.load({
 		 * plain "div with a button" once enhanced a rewind portal too, doubling
 		 * the icon. The strip mark makes repeat scans no-ops.
 		 */
-		function startDomEnhancement(sessionIdOf, t) {
+		function startDomEnhancement(source, t) {
 			const disposers = [];
+			const retryTimers = [];
 			let lastSweep = 0;
+			let lastFlowSweep = 0;
 			const sweepStrayIcons = (now) => {
 				if (now - lastSweep < 1500) return;
 				lastSweep = now;
-				for (const icon of document.querySelectorAll("button[data-dsh-delete-icon]")) {
+				for (const icon of safeQueryAll(document, "button[data-dsh-delete-icon]")) {
 					const strip = icon.parentElement;
 					if (strip === null || !looksLikeActionsStrip(strip) || !strip.hasAttribute(STRIP_MARK)) {
 						icon.remove();
 					}
 				}
 			};
+			/** Hide transcript rows whose seq the ledger (or a healed preflight) knows is deleted. */
+			const sweepFlowItems = () => {
+				const now = Date.now();
+				if (now - lastFlowSweep < 800) return;
+				lastFlowSweep = now;
+				for (const wrapper of safeQueryAll(document, "[data-chat-flow-key]")) processFlowItem(wrapper, source);
+			};
+			const flowItemsWithin = (node) => {
+				if (!(node instanceof Element)) return [];
+				return node.hasAttribute("data-chat-flow-key")
+					? [node]
+					: safeQueryAll(node, "[data-chat-flow-key]");
+			};
 			const observer = new MutationObserver((mutations) => {
 				sweepStrayIcons(Date.now());
+				sweepFlowItems();
 				for (const mutation of mutations) {
 					for (const node of mutation.addedNodes) {
 						if (!(node instanceof Element)) continue;
+						for (const wrapper of flowItemsWithin(node)) processFlowItem(wrapper, source);
 						const candidates = [node, ...node.querySelectorAll("*")];
 						for (const el of candidates) {
 							if (!el.matches("[data-time-hover-root]")) continue;
@@ -672,7 +1190,7 @@ window.__ModuleLoader__.load({
 							for (const child of el.children) {
 								if (child.hasAttribute(STRIP_MARK)) continue;
 								if (!looksLikeActionsStrip(child)) continue;
-								const disposer = enhanceUserRow(child, sessionIdOf, t);
+								const disposer = enhanceUserRow(child, source, t);
 								if (typeof disposer === "function") disposers.push(disposer);
 							}
 						}
@@ -680,9 +1198,19 @@ window.__ModuleLoader__.load({
 				}
 			});
 			observer.observe(document.body, { childList: true, subtree: true });
-			console.info("[delete-message] DOM enhancement active (user rows)");
+			// Initial pass plus a short retry ladder: the passive session-id
+			// capture can land after the first paint, so deferred rows (and
+			// their preflight healing) re-evaluate once it does.
+			sweepFlowItems();
+			for (const delay of [400, 1200, 3000]) {
+				retryTimers.push(setTimeout(() => {
+					sweepFlowItems();
+				}, delay));
+			}
+			console.info("[delete-message] DOM enhancement active (user rows + deleted-row hider)");
 			return () => {
 				observer.disconnect();
+				for (const timer of retryTimers.splice(0)) clearTimeout(timer);
 				for (const dispose of disposers.splice(0)) dispose();
 			};
 		}
@@ -798,6 +1326,7 @@ window.__ModuleLoader__.load({
 					// missing face degrades to a disabled button instead of a crash.
 					const safeUseSession = typeof useSession === "function" ? useSession : () => undefined;
 					const resolved = safeUseSession((snapshot) => findSeqByMessageId(snapshot, messageId));
+					const snapshot = safeUseSession((s) => s);
 					const [busy, setBusy] = react.useState(false);
 					const [failure, setFailure] = react.useState(null);
 					const buttonRef = react.useRef(null);
@@ -809,6 +1338,21 @@ window.__ModuleLoader__.load({
 						return attachTooltip(el, () => t("delete"));
 					}, [t]);
 
+					// On every snapshot revision, hide every ledger-tracked row via
+					// the chat-node key path — this is the authoritative load-time
+					// sweep (fiber-based resolution from the DOM path may fail for
+					// assistant-step rows whose wrapper has no hover root). The whole
+					// ledger goes in as one plan: exact seqs plus turn ranges, so
+					// stale tool/call chrome inside a deleted turn heals too.
+					react.useEffect(() => {
+						if (snapshot === null || snapshot === undefined) return;
+						const sid = sessionIds.current();
+						if (typeof sid !== "string") return;
+						const entry = ledgerFor(sid);
+						if (entry.seqs.size === 0 && entry.ranges.length === 0) return;
+						hideRowsForSeqViaChatNodes(sid, { seqs: [...entry.seqs], ranges: entry.ranges }, snapshot);
+					}, [snapshot]);
+
 					const onDelete = async () => {
 						if (typeof sessionId !== "string" || busy) return;
 						if (typeof resolved !== "number") {
@@ -817,10 +1361,23 @@ window.__ModuleLoader__.load({
 						}
 						setBusy(true);
 						setFailure(null);
-						const outcome = await makeDeleteFlow(t)(sessionId, resolved);
+						const outcome = await makeDeleteFlow(t)(sessionId, resolved, "assistant");
 						setBusy(false);
-						if (outcome?.ok) console.info("[delete-message] assistant message deleted (session %s seq %d)", sessionId, resolved);
-						else if (outcome?.cancelled !== true && outcome?.error !== undefined) {
+						if (outcome?.ok) {
+							const plan = {
+								seqs: replacedSeqsOf(outcome, resolved),
+								ranges: outcome?.mode === "turn" && outcome?.range !== undefined ? [outcome.range] : []
+							};
+							console.info("[delete-message] assistant reply deleted (session %s, %d node(s), mode %s)", sessionId, plan.seqs.length, outcome?.mode ?? "single");
+							hideRowsBySeq(sessionId, plan);
+							hideRowsForSeqViaChatNodes(sessionId, plan, snapshot);
+						} else if (outcome?.error === "already-shadowed") {
+							// The server already replaced this node (a prior delete landed
+							// but rows were never hidden). Treat as a visual success.
+							console.info("[delete-message] assistant seq %d already shadowed; hiding row (session %s)", resolved, sessionId);
+							hideRowsBySeq(sessionId, [resolved]);
+							hideRowsForSeqViaChatNodes(sessionId, [resolved], snapshot);
+						} else if (outcome?.cancelled !== true && outcome?.error !== undefined) {
 							const reasonKey = `reason.${outcome.error}`;
 							const reason = t(reasonKey);
 							setFailure(reason === reasonKey ? outcome.error : reason);
@@ -857,7 +1414,7 @@ window.__ModuleLoader__.load({
 
 			// Mount 2 — user rows (DOM enhancement).
 			try {
-				startDomEnhancement(() => sessionIds.current(), detectDomLocale() === "en" ? translateWith(en) : translateWith(zh));
+				startDomEnhancement(sessionIds, detectDomLocale() === "en" ? translateWith(en) : translateWith(zh));
 			} catch (error) {
 				console.error("[delete-message] DOM enhancement failed to start:", error);
 			}
@@ -868,6 +1425,23 @@ window.__ModuleLoader__.load({
 			apply,
 			findSeqByMessageId,
 			seqFromFiber,
+			resolveRowSeq,
+			probeElementsFor,
+			resolveWrapperSeq,
+			processFlowItem,
+			hideRowsBySeq,
+			hideRowsForSeqViaChatNodes,
+			asSeqList,
+			replacedSeqsOf,
+			asPlan,
+			planCovers,
+			ledgerHas,
+			ledgerMark,
+			ledgerMarkRange,
+			ledgerFor,
+			openConfirmDialog,
+			openNoticeDialog,
+			safeQueryAll,
 			enhanceUserRow,
 			startDomEnhancement,
 			looksLikeActionsStrip,
@@ -876,7 +1450,6 @@ window.__ModuleLoader__.load({
 			detectDomLocale,
 			Tooltip,
 			attachTooltip,
-			openConfirmDialog,
 			injectStyleOnce,
 			TrashGlyph,
 			TRASH_SVG_HTML,
@@ -886,6 +1459,8 @@ window.__ModuleLoader__.load({
 			ACTION_CLASS,
 			BUBBLE_CLASS,
 			STRIP_MARK,
+			HIDDEN_MARK,
+			LEDGER_PREFIX,
 			STATUS_PATH,
 			DELETE_PATH
 		};

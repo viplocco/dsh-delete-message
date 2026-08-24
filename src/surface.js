@@ -158,6 +158,166 @@ export function assessDeletion(events, seq) {
 }
 
 /**
+ * Surface nodes removable as part of a whole-reply deletion. Assistant
+ * messages (tool-calling or not) and their paired tool results go together —
+ * removing half of a call/result pair would leave orphan entries the next
+ * model request rejects. Machine-INJECTED context (a user/message whose
+ * source kind is not "user" — plugin splices like the runtime-context note)
+ * belongs to the visible unit too; real user words are NEVER candidates.
+ */
+export const TURN_UNIT_TYPES = new Set(["assistant/message", "tool/result"]);
+
+/** A prior deletion placeholder — machine chrome from THIS plugin, never a boundary. */
+export function isDeletionPlaceholder(event) {
+	return event.type === "user/message"
+		&& typeof event.data?.id === "string"
+		&& event.data.id.startsWith("deleted-");
+}
+
+/** A REAL user input: typed by the user, not injected, not one of our placeholders. */
+export function isRealUserInput(event) {
+	return event.type === "user/message"
+		&& event.data?.source?.kind === "user"
+		&& !isDeletionPlaceholder(event);
+}
+
+/**
+ * The user-input window containing `seq`: strictly between the previous and
+ * the next REAL user input. By construction no real user input lies INSIDE
+ * the window, so any row anchored within it is machine material — which is
+ * what makes range-hiding safe even on code paths that cannot see node kinds.
+ *
+ * @returns `{ start, end }` where either bound may be `null` (open side).
+ */
+export function userWindowOf(events, seq) {
+	let start = null;
+	let end = null;
+	for (const event of events) {
+		if (!isRealUserInput(event)) continue;
+		if (event.seq < seq) start = event.seq;
+		else if (event.seq > seq) {
+			end = event.seq;
+			break;
+		}
+	}
+	return { start, end };
+}
+
+/** Whether `seq` sits strictly inside the window (null bounds are open sides). */
+export function inUserWindow(window, seq) {
+	if (typeof seq !== "number") return false;
+	if (window.start !== null && seq <= window.start) return false;
+	if (window.end !== null && seq >= window.end) return false;
+	return true;
+}
+
+/** A live member of a reply unit: unshadowed assistant/tool material, injected context, or an old placeholder. */
+export function isTurnUnitMember(event) {
+	if (isDeletionPlaceholder(event)) return true;
+	if (event.surfaceOp !== "append") return false;
+	if (TURN_UNIT_TYPES.has(event.type)) return true;
+	return event.type === "user/message" && event.data?.source?.kind !== "user";
+}
+
+/**
+ * Whether EVERY removable member inside the window is already shadowed — i.e.
+ * the whole visible unit has been deleted (possibly across several clicks),
+ * so any remaining row anchored inside it is stale chrome (tool/call summaries
+ * and the like) a client should hide on sight.
+ */
+export function turnUnitCleared(events, window) {
+	if (!window) return false;
+	let members = 0;
+	for (const event of events) {
+		if (!inUserWindow(window, event.seq)) continue;
+		if (!isTurnUnitMember(event)) continue;
+		members += 1;
+		if (!shadowedBy(events, event.seq)) return false;
+	}
+	return members > 0;
+}
+
+/**
+ * Locate the turn bracket enclosing `seq`.
+ *
+ * @param {readonly any[]} events - full log, in seq order.
+ * @param {number} seq - candidate event's seq.
+ * @returns `{ start, end, open }` with `end` = the closing turn/end seq and
+ *   `open: false`, or `{ start, open: true }` when the bracket never closes,
+ *   or `undefined` when the seq sits before/outside every bracket.
+ */
+export function enclosingTurnBracket(events, seq) {
+	let start = -1;
+	for (const event of events) {
+		if (event.seq > seq) break;
+		if (event.type === "turn/start") start = event.seq;
+	}
+	if (start === -1) return undefined;
+	for (const event of events) {
+		if (event.seq <= start) continue;
+		if (event.type === "turn/start") return { start, open: true };
+		if (event.type === "turn/end") return { start, end: event.seq, open: false };
+	}
+	return { start, open: true };
+}
+
+/**
+ * Plan one deletion as the user perceives it: for an ASSISTANT target, the
+ * unit is its USER-INPUT WINDOW — everything between the previous and the
+ * next real user input (assistant messages, tool results, machine-injected
+ * context). The transcript renders those as many separate rows (per-step
+ * think/prose nodes, per-tool call nodes), so replacing only the closing
+ * message left the wall of tool activity on screen while its final prose
+ * vanished. Because the window is bounded by real user inputs BY
+ * CONSTRUCTION, no user row can ever fall inside the hide range — the safety
+ * property holds even on client paths that cannot see node kinds. Real user
+ * inputs act as boundaries and are never members; steering splits windows.
+ * Previously-shadowed members are skipped, so re-clicking a half-deleted
+ * reply cleans up the rest in one action.
+ *
+ * A USER-message target keeps single-node semantics (clicking delete on your
+ * own row must never erase anything else).
+ *
+ * @param {readonly any[]} events - the session's full event snapshot, in seq order.
+ * @param {number} seq - the surface node the user asked to delete.
+ * @returns `{ ok: true, mode: "single"|"turn", seqs: number[], range? }` or
+ *   `{ ok: false, reason }` using the same REFUSALS vocabulary. `range`
+ *   (turn mode) is the `{ start, end }` window bounds (either `null` when
+ *   open-ended) for client-side chrome hiding — including non-surface
+ *   tool/call rows that no replacement could ever cite.
+ */
+export function planDeletion(events, seq) {
+	if (!Number.isSafeInteger(seq) || seq < 0) return { ok: false, reason: REFUSALS.NOT_FOUND };
+	const target = events.find((event) => event.seq === seq);
+	if (target === undefined) return { ok: false, reason: REFUSALS.NOT_FOUND };
+	if (!DELETABLE_TYPES.has(target.type)) return { ok: false, reason: REFUSALS.NOT_SURFACE_TYPE };
+
+	// User rows: exactly the old single-node contract, all its rules intact.
+	if (target.type === "user/message") {
+		const verdict = assessDeletion(events, seq);
+		return verdict.ok ? { ok: true, mode: "single", seqs: [seq] } : verdict;
+	}
+
+	// Assistant target: the whole user-input window. Safety while the agent is
+	// still working through the enclosing turn stays non-negotiable.
+	const bracket = enclosingTurnBracket(events, seq);
+	if (bracket !== undefined && bracket.open) return { ok: false, reason: REFUSALS.OPEN_TURN };
+
+	const window = userWindowOf(events, seq);
+	const seqs = [];
+	for (const event of events) {
+		if (!inUserWindow(window, event.seq)) continue;
+		if (!isTurnUnitMember(event)) continue;
+		if (shadowedBy(events, event.seq)) continue;
+		seqs.push(event.seq);
+	}
+	// The clicked node may already be shadowed (a prior partial delete); what
+	// matters is whether ANY live member of the unit remains to remove.
+	if (seqs.length === 0) return { ok: false, reason: REFUSALS.ALREADY_SHADOWED };
+	return { ok: true, mode: "turn", seqs, range: { start: window.start, end: window.end } };
+}
+
+/**
  * Build the placeholder `user/message` payload that replaces a deleted node.
  *
  * Mirrors compaction's checkpoint shape: a user-role message whose text says
