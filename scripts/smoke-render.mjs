@@ -168,6 +168,40 @@ const persisted = JSON.parse(ledgetStore.get(`${registered.LEDGER_PREFIX}s-ledge
 if (!persisted || !Array.isArray(persisted.s) || persisted.s.join(",") !== "42,43" || !Array.isArray(persisted.r)) {
 	throw new Error("ledger persistence malformed");
 }
+// Regression (v0.1.3 → fix): turn-window bounds are EXCLUSIVE — each bound IS
+// a real user input, so boundary seqs must read uncovered while strictly
+// inside rows stay covered. The old inclusive comparison made the sweeper hide
+// BOTH neighboring user inputs of every turn delete ("deleting one reply eats
+// the surrounding user prompts").
+registered.ledgerMarkRange("s-ranges", { start: 10, end: 20 });
+if (registered.ledgerHas("s-ranges", 10)) throw new Error("window start (a real user input) must NOT be covered");
+if (registered.ledgerHas("s-ranges", 20)) throw new Error("window end (a real user input) must NOT be covered");
+if (!registered.ledgerHas("s-ranges", 11) || !registered.ledgerHas("s-ranges", 19)) {
+	throw new Error("rows strictly inside the window must be covered");
+}
+// Open sides stay open, and a null bound must not coerce to 0.
+registered.ledgerMarkRange("s-open-start", { start: null, end: 30 });
+if (!registered.ledgerHas("s-open-start", 5) || registered.ledgerHas("s-open-start", 30)) {
+	throw new Error("null start must be an open side, not zero");
+}
+registered.ledgerMarkRange("s-open-end", { start: 30, end: null });
+if (!registered.ledgerHas("s-open-end", 9999) || registered.ledgerHas("s-open-end", 30)) {
+	throw new Error("null end must be an open side");
+}
+// Two windows touching at a shared real-user-input bound must NOT merge — an
+// inclusive merge ([10,20]+[20,30] → [10,30]) would re-cover seq 20.
+registered.ledgerMarkRange("s-adjacent", { start: 10, end: 20 });
+registered.ledgerMarkRange("s-adjacent", { start: 20, end: 30 });
+if (registered.ledgerHas("s-adjacent", 20)) throw new Error("a shared boundary user input must stay uncovered after adjacent marks");
+const adjacent = JSON.parse(ledgetStore.get(`${registered.LEDGER_PREFIX}s-adjacent`));
+if (!adjacent || adjacent.r.length !== 2) throw new Error("touching windows must persist as two separate ranges");
+// Genuinely overlapping windows still coalesce.
+registered.ledgerMarkRange("s-overlap", { start: 10, end: 20 });
+registered.ledgerMarkRange("s-overlap", { start: 15, end: 25 });
+const overlap = JSON.parse(ledgetStore.get(`${registered.LEDGER_PREFIX}s-overlap`));
+if (!overlap || overlap.r.length !== 1 || overlap.r[0][0] !== 10 || overlap.r[0][1] !== 25) {
+	throw new Error("overlapping windows must coalesce");
+}
 eq(registered.detectDomLocale().length > 0, true, "dom locale heuristic returns something");
 
 console.log("SMOKE OK — assistant slot renders without crashing; seq resolution contract holds");

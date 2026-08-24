@@ -119,6 +119,23 @@ v0.1.2 收紧了两条防重复规则：**(a)** 候选条带只取悬停根的�
 
 `makeDeleteFlow(t)` 返回的 `runDelete(sessionId, seq, role)` 第三个参数携带的就是这条静态知识——零运行时探测。它与宿主端 `planDeletion` 的语义分叉一一对应：user 目标 `mode:"single"` 仅替换该节点；assistant 目标 `mode:"turn"` 替换整个用户输入窗口（各步回复、tool/result、机器注入上下文）。原 `confirmBody` 保留为未知角色的兜底键。
 
+### 4.4 v0.1.3 回归记录：回合窗口的边界是开区间，用户行只认精确 seq
+
+**症状**：删除第 1 轮的助手回复，前后两条用户输入也一起从界面上消失，只剩下一轮回复——"删一条回复吞掉相邻的用户输入"。服务端 `planDeletion` 无辜（真用户输入只作窗口边界、永不入列），病灶全在客户端隐藏层。
+
+**根因（两处，都在台账对区间的解读上）**：
+1. `ledgerHas()` 用**闭区间**比较（`seq >= start && seq <= end`）判断一行是否被回合窗口覆盖。而窗口的 `start/end` 本身就是两侧真用户输入的 seq（`userWindowOf` 语义），于是清扫器把边界上的活用户行当成"已删 chrome"隐藏；`null` 边界还会被比较强转成 0（删除会话第一条回复时会波及它之前的一切用户行）。
+2. `ledgerMarkRange()` 的吸收合并用可相切的重叠判断（`<=`/`>=`）：相邻两个窗口共享同一条用户输入作边界时（`[u1,u2]` + `[u2,u3]`）合并成 `[u1,u3]`，共享边界在开区间语义下重新变成"被覆盖"。
+3. 同类隐患一并加固：清扫器 preflight 的 `windowCleared` 治愈分支不看节点角色——用户行的预检同样会返回 `windowCleared:true`（它的窗口正是那个已清空的单元），照样把自己藏掉。
+
+**修复（仅 client.js，服务端零改动）**：
+- `ledgerHas` 改严格开区间（`>`/`<`，null = 开侧），与 `planCovers` 对齐；
+- 吸收合并改双侧严格不等号——只在真正重叠时合并，相切窗口保持独立；
+- fiber 行解析顺带记录节点角色（`rowKindCache`）：`processFlowItem` 中 user/steering 行**只能被自己的精确已删 seq 隐藏**（单条删除语义），区间与 `windowCleared` 治愈一概不适用——即使未来某处再写出坏边界，真用户词也有最后一道闸。
+
+**教训**：同一条不变量（"真用户输入是边界、永不被窗口覆盖"）在 `planCovers`、`hideRowsForSeqViaChatNodes` 里都守住了，却在第三个消费点 `ledgerHas` 上以闭区间形式破防。**安全不变量必须收敛到单一实现**，或在每个消费点都有测试钉死——现在冒烟脚本断言了边界开区间、null 开侧、相切不合并、重叠才合并四条契约。
+
+
 ## 5. Host API
 
 | 路由 | 方法 | 语义 |
@@ -152,10 +169,11 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
 - **v0.1**（本仓库当前）：单条删除（保守规则集）、确认流、占位替换、i18n（zh/en）、测试 39 例。
 - **v0.1.1**：占位补 `source: { kind: "user" }`（§5.1 回归修复），测试 40 例。
 - **v0.1.2**：UI 一致性修复——助手侧条目因单参 `jsx()` 崩溃被错误边界静默退位（按钮"消失"）改写为 feedback 同款注册形态；用户侧条带识别收紧到直接子级 + 幂等标记（消灭重复图标）；官方垃圾桶图标几何、28×28 操作钮样式值、Tooltip 复刻气泡、Modal+Button 复刻确认弹窗全面对齐宿主语言；DOM 路径会话 id 接 `sessions.selected`。测试 44 例 + 渲染冒烟（scripts/smoke-render.mjs，用宿主同款 React 18.3.1 真渲染 slot 组件）。
-- **v0.1.3**（工作区已改，未发版）：三个实测回归的修复——
+- **v0.1.3**：四个实测回归的修复——
   1. **删除后界面不消失**（§2 真相节）：宿主转录只收 append-origin 事件，replace 不动界面。新增客户端隐藏层：每会话已删 seq 台账（localStorage，上限 400）+ `[data-chat-flow-key]` 行清扫器（fiber 解析行身份，覆盖 user/steering/context/assistant-step/turn-tail 五种节点）+ `/status` 预检治愈历史行；成功删除立即隐藏。
   2. **失败原因显示原始错误码**（如字面 "already-shadowed"）：宿主 `LocaleRuntime.lookup` 只做一层键查找，嵌套 `reason: {}` 永远查不中。词典改扁平点号键，`translateWith` 先平查再逐级走。
   3. **用户行点击直接弹原生 alert**：点击处理器先查被动捕获的会话 id、后跑 fiber——页面重载后捕获为空时没找就拒绝。改为先解析（多锚点：条带内宿主按钮 → 行包装器探测链）并顺带喂捕获，再校验；所有拒绝/失败统一走复刻 Modal 的通知弹窗，原生 alert 全部退役。
   4. **确认文案按角色自动判定 + 英文全量润色**（§4.3）：`runDelete` 增加静态 `role` 参数，词典拆出 `confirmBodyUser/confirmBodyAssistant`，"若为助手回复"条件句退役；英文 UI 文案整轮完善（`noticeOk` "Got it"→"Dismiss"，全部 `reason.*` 改完整陈述句并统一标点）。冒烟脚本同步两处：台账断言从 v1 裸数组修正为 v2 `{s,r}` 形状（v0.1.3 第 1 项落地时的漏网旧断言），新增角色化文案键的存在性检查。
+- **v0.1.4**（当前发版）：**删除回复吞掉相邻用户输入**（§4.4 回归修复，仅客户端半区，硬刷新生效）——`ledgerHas` 对回合窗口闭区间比较（边界即真用户输入的 seq，null 还被强转成 0）、`ledgerMarkRange` 相切合并、preflight `windowCleared` 不分角色，三条路径合谋把窗口两侧的用户行当 chrome 隐藏。修复：开区间语义统一、相切不合并、清扫器按节点角色放行真用户行；冒烟脚本新增四条区间契约断言。
 - **v0.2**：成组删除（assistant tool_use + 其 result 一起 replace）、撤销（对占位再 append 一个反向引用？评估可行性）、删除前预检缓存与图标置灰。
 - **v1.0**：冷会话支持（fork-rebuild：inspect 全量 → 过滤 → 新会话 + 打开），若宿主届时提供原生编辑缝则迁移过去。

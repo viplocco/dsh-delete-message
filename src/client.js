@@ -388,6 +388,7 @@ window.__ModuleLoader__.load({
 		const LEDGER_PREFIX = "dsh-delete-message:deleted:v2:";
 		const LEDGER_CAP = 400;
 		const rowSeqCache = new WeakMap();
+		const rowKindCache = new WeakMap();
 		const preflightTried = new WeakSet();
 
 		/** querySelectorAll that survives minimal DOM stubs (smoke harness). */
@@ -414,28 +415,35 @@ window.__ModuleLoader__.load({
 					const node = props?.node;
 					if (node !== undefined && node !== null && typeof node === "object") {
 						const data = node.data;
+						let seq;
 						switch (node.kind ?? "") {
 							case "user":
 							case "steering":
 							case "context":
-								if (typeof data?.seq === "number") return data.seq;
+								seq = typeof data?.seq === "number" ? data.seq : undefined;
 								break;
 							case "assistant":
 							case "assistant-step":
-								if (typeof data?.finalNode?.seq === "number") return data.finalNode.seq;
+								seq = typeof data?.finalNode?.seq === "number" ? data.finalNode.seq : undefined;
 								break;
 							case "turn-tail":
-								if (typeof data?.closing?.finalNode?.seq === "number") return data.closing.finalNode.seq;
+								seq = typeof data?.closing?.finalNode?.seq === "number" ? data.closing.finalNode.seq : undefined;
 								break;
 							case "tool-call":
 							case "model-retry":
 								// These rows are chrome over NON-surface events; their
 								// identity is the node's top-level anchorSeq (present on
 								// every chat node kind), not anything inside data.
-								if (typeof node.anchorSeq === "number") return node.anchorSeq;
+								seq = typeof node.anchorSeq === "number" ? node.anchorSeq : undefined;
 								break;
 							default:
 								break;
+						}
+						if (typeof seq === "number") {
+							// Record WHICH kind produced the seq: the hider needs the row
+							// role to keep turn-window ranges off real user/steering rows.
+							rowKindCache.set(element, String(node.kind ?? ""));
+							return seq;
 						}
 					}
 					if (typeof onSessionId === "function" && typeof props?.sessionId === "string") {
@@ -482,7 +490,11 @@ window.__ModuleLoader__.load({
 		function resolveWrapperSeq(wrapper, onSessionId) {
 			for (const probe of probeElementsFor(wrapper)) {
 				const seq = resolveRowSeq(probe, onSessionId);
-				if (typeof seq === "number") return seq;
+				if (typeof seq === "number") {
+					const kind = rowKindCache.get(probe);
+					if (typeof kind === "string") rowKindCache.set(wrapper, kind);
+					return seq;
+				}
 			}
 			return undefined;
 		}
@@ -543,7 +555,15 @@ window.__ModuleLoader__.load({
 		function ledgerHas(sessionId, seq) {
 			const entry = ledgerFor(sessionId);
 			if (entry.seqs.has(seq)) return true;
-			return entry.ranges.some((range) => seq >= range.start && seq <= range.end);
+			// Range bounds are EXCLUSIVE — each bound IS a real user input, so the
+			// boundary seqs themselves are live user rows that must read uncovered.
+			// v0.1.3 compared inclusively here (`>=`/`<=`, with a null bound
+			// coercing to 0), so after every turn delete this read the two
+			// neighboring user inputs as covered chrome and the sweeper hid them:
+			// "deleting one reply eats the surrounding user prompts".
+			return entry.ranges.some((range) =>
+				(range.start === null || seq > range.start) && (range.end === null || seq < range.end)
+			);
 		}
 		function ledgerMark(sessionId, seq) {
 			const entry = ledgerFor(sessionId);
@@ -556,11 +576,15 @@ window.__ModuleLoader__.load({
 			const end = Number.isSafeInteger(range.end) ? range.end : null;
 			if (start === null && end === null) return;
 			const entry = ledgerFor(sessionId);
-			// Absorb into an existing fully-bounded overlapping range when possible.
+			// Absorb into an existing fully-bounded OVERLAPPING range when
+			// possible. The comparison is strict on both sides: two windows that
+			// merely TOUCH at a shared real-user-input bound must stay separate —
+			// an inclusive merge ([10,20]+[20,30] → [10,30]) would re-cover the
+			// shared boundary row under the exclusive semantics above.
 			let absorbed = false;
 			if (start !== null && end !== null) {
 				for (const existing of entry.ranges) {
-					if (existing.start !== null && existing.end !== null && start <= existing.end && end >= existing.start) {
+					if (existing.start !== null && existing.end !== null && start < existing.end && end > existing.start) {
 						existing.start = Math.min(existing.start, start);
 						existing.end = Math.max(existing.end, end);
 						absorbed = true;
@@ -713,7 +737,15 @@ window.__ModuleLoader__.load({
 				}
 			}
 			if (typeof seq !== "number") return;
-			if (ledgerHas(sessionId, seq)) {
+			// Real user words hide ONLY through their own exact deleted seq — the
+			// single-mode delete of that very row. Turn-window ranges never apply
+			// to user/steering rows because the bounds ARE such rows; for the
+			// same reason the windowCleared preflight below stays chrome-only.
+			// (v0.1.3 regression guard: inclusive ledger comparisons once made
+			// this sweeper hide both neighboring user inputs of a turn delete.)
+			const kind = rowKindCache.get(wrapper);
+			const isUserRole = kind === "user" || kind === "steering";
+			if (isUserRole ? ledgerFor(sessionId).seqs.has(seq) : ledgerHas(sessionId, seq)) {
 				wrapper.setAttribute(HIDDEN_MARK, "");
 				return;
 			}
@@ -725,7 +757,7 @@ window.__ModuleLoader__.load({
 						if (status.reason === "already-shadowed") {
 							ledgerMark(sessionId, seq);
 							if (wrapper.isConnected) wrapper.setAttribute(HIDDEN_MARK, "");
-						} else if (status.windowCleared === true && status.window !== undefined) {
+						} else if (!isUserRole && status.windowCleared === true && status.window !== undefined) {
 							// The whole reply unit is deleted server-side; this row is
 							// stale chrome (a tool/call summary) anchored inside the
 							// user-input window. Record the window so reloads hide it
