@@ -211,3 +211,45 @@ describe("attachRoutes wiring", () => {
 		assert.equal(deps.session.appends.length, 0);
 	});
 });
+
+describe("buildStatus reports a BOUNDED client-hide window", () => {
+	// The client persists status.window into its deletion ledger on
+	// windowCleared healing. A right-open window (`end: null`) once persisted
+	// covered every row appended AFTER it — all future assistant replies were
+	// hidden on sight. Regression contract: end is always a safe integer.
+	it("clamps the window past the last real user input", async () => {
+		const session = {
+			events: [
+				{ seq: 0, type: "turn/start" },
+				{ seq: 1, type: "user/message", surfaceOp: "append", data: { source: { kind: "user" }, content: [] } },
+				{ seq: 2, type: "assistant/message", surfaceOp: "append", data: { message: { content: [] } } },
+				{ seq: 3, type: "llm/retry" },
+				{ seq: 4, type: "turn/end" }
+			]
+		};
+		const sessions = { get: (id) => (id === "s1" ? session : undefined) };
+		const payload = await plugin.buildStatus(sessions, "s1", 2);
+		assert.equal(payload.live, true);
+		assert.equal(payload.windowCleared, false);
+		assert.equal(payload.window.start, 1);
+		assert.equal(payload.window.end, 5, "lastEventSeq+1 — never null");
+	});
+
+	it("keeps an existing right bound untouched", async () => {
+		const session = {
+			events: [
+				{ seq: 0, type: "turn/start" },
+				{ seq: 1, type: "user/message", surfaceOp: "append", data: { source: { kind: "user" }, content: [] } },
+				{ seq: 2, type: "assistant/message", surfaceOp: "append", data: { message: { content: [] } } },
+				{ seq: 3, type: "turn/end" },
+				{ seq: 4, type: "turn/start" },
+				{ seq: 5, type: "user/message", surfaceOp: "append", data: { source: { kind: "user" }, content: [] } },
+				{ seq: 6, type: "assistant/message", surfaceOp: "append", data: { message: { content: [] } } },
+				{ seq: 7, type: "turn/end" }
+			]
+		};
+		const sessions = { get: (id) => (id === "s1" ? session : undefined) };
+		const payload = await plugin.buildStatus(sessions, "s1", 2);
+		assert.deepEqual(payload.window, { start: 1, end: 5 });
+	});
+});

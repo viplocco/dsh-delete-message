@@ -178,7 +178,7 @@ export function attachRoutes(ctx, httpServer, deps) {
 		STATUS_PATH,
 		async (req, res) => {
 			const query = parseQuery(req.url);
-			send(res, 200, await deps.buildStatus(query.sessionId, query.seq));
+			send(res, 200, await deps.buildStatus(query.sessionId, query.seq, query.scope));
 		},
 		"deletion preflight"
 	);

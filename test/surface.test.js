@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { assessDeletion, buildPlaceholder, enclosingTurnBracket, hasToolUse, insideOpenTurn, planDeletion, REFUSALS } from "../src/surface.js";
+import { assessDeletion, boundClientWindow, buildPlaceholder, enclosingTurnBracket, hasToolUse, insideOpenTurn, planDeletion, REFUSALS } from "../src/surface.js";
 
 /** Event factory — only the fields the rules read. */
 function event(seq, type, extra = {}) {
@@ -298,6 +298,110 @@ describe("planDeletion (user-input windows)", () => {
 	});
 });
 
+describe("planDeletion (unit mode via machine-injected context)", () => {
+	it("expands an injected context row to the whole live window (mode unit)", () => {
+		// multiStepTurnLog: seq 2 is the machine-injected plugin row.
+		assert.deepEqual(planDeletion(multiStepTurnLog(), 2), {
+			ok: true,
+			mode: "unit",
+			seqs: [2, 3, 4, 5, 6, 7, 8],
+			range: { start: 1, end: 11 }
+		});
+	});
+
+	it("never covers the real user boundary rows", () => {
+		const verdict = planDeletion(multiStepTurnLog(), 2);
+		assert.equal(verdict.seqs.includes(1), false);
+		assert.equal(verdict.seqs.includes(11), false);
+		assert.equal(planCoversLike(verdict.range, 1), false);
+		assert.equal(planCoversLike(verdict.range, 11), false);
+	});
+
+	it("keeps single semantics for a REAL user message (source kind user)", () => {
+		assert.deepEqual(planDeletion(multiStepTurnLog(), 1), { ok: true, mode: "single", seqs: [1] });
+	});
+
+	it("cleans a failed turn that produced NO assistant message", () => {
+		// The screenshot shape: user prompt + three machine-injected context
+		// rows, then a closed turn with nothing else — a 502 retry chain.
+		const append = (seq, type, extra = {}) => event(seq, type, { surfaceOp: "append", ...extra });
+		const events = [
+			append(0, "turn/start"),
+			append(1, "user/message", { data: { id: "u1", role: "user", source: { kind: "user" }, content: [] } }),
+			append(2, "user/message", { data: { id: "ctx-1", role: "user", source: { kind: "plugin" }, content: [] } }),
+			append(3, "user/message", { data: { id: "ctx-2", role: "user", source: { kind: "plugin" }, content: [] } }),
+			append(4, "user/message", { data: { id: "ctx-3", role: "user", source: { kind: "skill-catalog" }, content: [] } }),
+			append(5, "turn/end")
+		];
+		const verdict = planDeletion(events, 2);
+		assert.deepEqual(verdict, { ok: true, mode: "unit", seqs: [2, 3, 4], range: { start: 1, end: 6 } });
+		// The user prompt is a boundary and must survive.
+		assert.equal(verdict.seqs.includes(1), false);
+	});
+
+	it("refuses an injected target inside an open turn", () => {
+		const append = (seq, type, extra = {}) => event(seq, type, { surfaceOp: "append", ...extra });
+		const events = [
+			append(0, "turn/start"),
+			append(1, "user/message", { data: { id: "u1", role: "user", source: { kind: "user" }, content: [] } }),
+			append(2, "user/message", { data: { id: "ctx-1", role: "user", source: { kind: "plugin" }, content: [] } })
+			// no turn/end — still streaming
+		];
+		assert.deepEqual(planDeletion(events, 2), { ok: false, reason: REFUSALS.OPEN_TURN });
+	});
+
+	it("skips already-shadowed members on a partially deleted unit", () => {
+		const base = multiStepTurnLog();
+		const extra = [
+			{
+				seq: 20,
+				type: "user/message",
+				surfaceOp: { op: "replace", start: 8, end: 8 },
+				sourceEventSeqs: [8],
+				data: { id: "deleted-8", role: "user", source: { kind: "user" }, content: [] }
+			}
+		];
+		const verdict = planDeletion([...base, ...extra], 2);
+		assert.deepEqual(verdict, { ok: true, mode: "unit", seqs: [2, 3, 4, 5, 6, 7], range: { start: 1, end: 11 } });
+	});
+
+	it("refuses when the whole unit is already shadowed", () => {
+		const base = multiStepTurnLog();
+		const extra = [];
+		for (const seq of [2, 3, 4, 5, 6, 7, 8]) {
+			extra.push({
+				seq: 30 + seq,
+				type: "user/message",
+				surfaceOp: { op: "replace", start: seq, end: seq },
+				sourceEventSeqs: [seq],
+				data: { id: `deleted-${seq}`, role: "user", source: { kind: "user" }, content: [] }
+			});
+		}
+		assert.deepEqual(planDeletion([...base, ...extra], 2), { ok: false, reason: REFUSALS.ALREADY_SHADOWED });
+	});
+
+	it("routes an already-shadowed injected row to unit cleanup when members remain", () => {
+		const base = multiStepTurnLog();
+		const extra = [
+			{
+				seq: 20,
+				type: "user/message",
+				surfaceOp: { op: "replace", start: 2, end: 2 },
+				sourceEventSeqs: [2],
+				data: { id: "deleted-2", role: "user", source: { kind: "user" }, content: [] }
+			}
+		];
+		// The clicked injected row is itself shadowed, but live members remain —
+		// the unit still plans them (mirrors assistant-mode tolerance).
+		assert.deepEqual(planDeletion([...base, ...extra], 2), {
+			ok: true,
+			mode: "unit",
+			seqs: [3, 4, 5, 6, 7, 8],
+			range: { start: 1, end: 11 }
+		});
+	});
+});
+
 /** Local mirror of the client's exclusive-bound window test. */
 function planCoversLike(range, seq) {
 	if (typeof seq !== "number") return false;
@@ -314,5 +418,194 @@ describe("enclosingTurnBracket", () => {
 	});
 	it("is undefined before any bracket", () => {
 		assert.equal(enclosingTurnBracket([event(5, "session/title")], 5), undefined);
+	});
+});
+
+describe("planDeletion (chrome anchors over non-surface events)", () => {
+	// The transcript renders rows anchored at NON-surface events — tool/call
+	// summaries, llm/retry chain entries, turn errors. A trash click there has
+	// no surface node to cite, so the anchor plans its whole user-input window.
+	function chromeAnchorLog() {
+		const append = (seq, type, extra = {}) => event(seq, type, { surfaceOp: "append", ...extra });
+		return [
+			append(0, "turn/start"),
+			append(1, "user/message", { data: { id: "u1", role: "user", source: { kind: "user" }, content: [] } }),
+			append(2, "user/message", { data: { id: "ctx", role: "user", source: { kind: "plugin" }, content: [] } }),
+			append(3, "assistant/message", { data: { message: { id: "a1", role: "assistant", source: { kind: "model", provider: "p", model: "m" }, content: [{ type: "tool_use", id: "t1" }] } } }),
+			event(4, "tool/call"),                                   // non-surface chrome
+			append(5, "tool/result", { data: { message: { id: "r1", role: "user", source: { kind: "tool", callId: "t1" }, content: [] } } }),
+			event(6, "llm/retry"),                                   // non-surface chrome
+			event(7, "llm/retry-started"),                           // non-surface chrome
+			append(8, "turn/end")
+		];
+	}
+
+	it("a tool/call summary anchor plans the window (assistant + result + injections)", () => {
+		assert.deepEqual(planDeletion(chromeAnchorLog(), 4), {
+			ok: true,
+			mode: "unit",
+			seqs: [2, 3, 5],
+			range: { start: 1, end: 9 }
+		});
+	});
+
+	it("an llm/retry anchor plans the same window", () => {
+		assert.deepEqual(planDeletion(chromeAnchorLog(), 6).seqs, [2, 3, 5]);
+		assert.deepEqual(planDeletion(chromeAnchorLog(), 7).seqs, [2, 3, 5]);
+	});
+
+	it("a chrome anchor never pulls in the boundary user row", () => {
+		const verdict = planDeletion(chromeAnchorLog(), 4);
+		assert.equal(verdict.seqs.includes(1), false);
+	});
+
+	it("refuses a chrome anchor inside an open turn", () => {
+		const events = [...chromeAnchorLog().slice(0, -1)];
+		events.push(
+			event(9, "turn/end"),
+			event(10, "turn/start"),
+			event(11, "user/message", { surfaceOp: "append", data: { id: "u2", role: "user", source: { kind: "user" }, content: [] } }),
+			event(12, "tool/call")
+		);
+		// seq 12 sits inside the OPEN bracket started at 10 → open-turn.
+		assert.deepEqual(planDeletion(events, 12), { ok: false, reason: REFUSALS.OPEN_TURN });
+	});
+
+	it("refuses with already-shadowed when a chrome anchor's window has no live members", () => {
+		// An event before ANY user input has no window members at all.
+		assert.deepEqual(planDeletion([event(0, "session/title")], 0), { ok: false, reason: REFUSALS.ALREADY_SHADOWED });
+	});
+});
+
+describe("planDeletion scope=step (per-step granular deletion)", () => {
+	// A multi-step turn modeled on real logs:
+	//   step 1: Think + 3 Glob calls → assistant/msg(3) + tool/results(5,7,9)
+	//   step 2: retry failed, no reply
+	function stepTurnLog() {
+		const append = (seq, type, extra = {}) => event(seq, type, { surfaceOp: "append", ...extra });
+		const asst = (seq, id, content) => append(seq, "assistant/message", { data: { message: { id, role: "assistant", source: { kind: "model", provider: "p", model: "m" }, content } } });
+		return [
+			append(0, "turn/start"),
+			append(1, "user/message", { data: { id: "u1", role: "user", source: { kind: "user" }, content: [] } }),
+			append(2, "user/message", { data: { id: "ctx1", role: "user", source: { kind: "plugin" }, content: [] } }),
+			asst(3, "a1", [{ type: "tool_use", id: "t1" }]),
+			event(4, "tool/call"),
+			append(5, "tool/result", { data: { message: { id: "r1", role: "user", source: { kind: "tool", callId: "t1" }, content: [] } } }),
+			event(6, "tool/call"),
+			asst(7, "a2", [{ type: "text", text: "step 1 answer" }]),
+			append(8, "turn/end")
+		];
+	}
+
+	it("deletes only the owning assistant/message + its tool/results (mode step)", () => {
+		// Target seq 4 (tool/call chrome anchor) → owning assistant is seq 3.
+		// Collection walks forward: assistant(3) + tool/result(5). Stops at
+		// assistant(7) (next step).
+		assert.deepEqual(planDeletion(stepTurnLog(), 4, "step"), {
+			ok: true,
+			mode: "step",
+			seqs: [3, 5],
+			range: { start: 3, end: 5 }
+		});
+	});
+
+	it("an assistant/message target deletes just itself when it has no tools", () => {
+		assert.deepEqual(planDeletion(stepTurnLog(), 7, "step"), {
+			ok: true,
+			mode: "step",
+			seqs: [7],
+			range: { start: 7, end: 7 }
+		});
+	});
+
+	it("other steps in the same turn survive a step deletion", () => {
+		const verdict = planDeletion(stepTurnLog(), 4, "step");
+		assert.equal(verdict.seqs.includes(7), false, "step 2's reply must survive");
+	});
+
+	it("machine-injected context rows are NOT collected in step mode", () => {
+		const verdict = planDeletion(stepTurnLog(), 4, "step");
+		assert.equal(verdict.seqs.includes(2), false, "injected context must stay");
+	});
+
+	it("real user input is never collected", () => {
+		const verdict = planDeletion(stepTurnLog(), 4, "step");
+		assert.equal(verdict.seqs.includes(1), false);
+	});
+
+	it("refuses with open-turn for an unsettled step", () => {
+		const events = [...stepTurnLog().slice(0, -1)]; // remove turn/end
+		events.push(event(9, "turn/start"), event(10, "assistant/message", { surfaceOp: "append", data: { message: { content: [] } } }));
+		assert.deepEqual(planDeletion(events, 10, "step"), { ok: false, reason: REFUSALS.OPEN_TURN });
+	});
+
+	it("backward-scans from a tool/result to find the owning assistant", () => {
+		// Target the tool/result at seq 5 directly.
+		const verdict = planDeletion(stepTurnLog(), 5, "step");
+		assert.deepEqual(verdict.seqs, [3, 5]);
+	});
+
+	it("skips already-shadowed members and collects remaining live ones", () => {
+		const base = stepTurnLog();
+		const shadow = {
+			seq: 20, type: "user/message",
+			surfaceOp: { op: "replace", start: 3, end: 3 },
+			sourceEventSeqs: [3],
+			data: { id: "deleted-3", role: "user", source: { kind: "user" }, content: [] }
+		};
+		const verdict = planDeletion([...base, shadow], 4, "step");
+		// assistant(3) is shadowed; tool/result(5) still live → collected.
+		assert.deepEqual(verdict.seqs, [5]);
+	});
+
+	it("without scope, routing stays backward-compatible", () => {
+		// Same target WITHOUT scope → unit mode (whole window), not step.
+		const verdict = planDeletion(stepTurnLog(), 4);
+		assert.equal(verdict.mode, "unit");
+		assert.notEqual(verdict.mode, "step");
+	});
+});
+
+describe("boundClientWindow (persistent hide-range right-bounding)", () => {
+	// Regression contract for 2026-08-29: a client PERSISTS the reported range
+	// in its deletion ledger. A right-open window (`end: null`) once stored
+	// covered every row appended AFTER the delete point, so the sweeper hid all
+	// future assistant replies — "delete the latest reply and the conversation
+	// never renders again". The reported range must therefore always carry a
+	// safe-integer end while still covering everything that exists today.
+	it("clamps an open end to lastEventSeq + 1", () => {
+		const events = [event(0, "turn/start"), event(3, "user/message"), event(9, "turn/end")];
+		assert.deepEqual(boundClientWindow(events, { start: 3, end: null }), { start: 3, end: 10 });
+		assert.deepEqual(boundClientWindow(events, { start: null, end: null }), { start: null, end: 10 });
+	});
+	it("keeps an existing bound and tolerates a missing window", () => {
+		const events = [event(0, "turn/start"), event(5, "turn/end")];
+		assert.deepEqual(boundClientWindow(events, { start: 1, end: 4 }), { start: 1, end: 4 });
+		assert.equal(boundClientWindow(events, undefined), undefined);
+	});
+
+	it("a LAST-turn delete reports a bounded range that never covers future rows", () => {
+		const append = (seq, type, extra = {}) => event(seq, type, { surfaceOp: "append", ...extra });
+		const user = (seq, id) => append(seq, "user/message", { data: { id, role: "user", source: { kind: "user" }, content: [] } });
+		const asstText = (seq, id) => append(seq, "assistant/message", { data: { message: { id, role: "assistant", source: { kind: "model", provider: "p", model: "m" }, content: [{ type: "text", text: "x" }] } } });
+		const events = [
+			append(0, "turn/start"),
+			user(1, "u1"),
+			asstText(2, "a1"),
+			append(3, "turn/end"),
+			append(4, "turn/start"),
+			user(5, "u2"),
+			asstText(6, "a2"),
+			append(7, "llm/retry"), // chrome after the last member
+			append(8, "turn/end")
+		];
+		// Deleting turn 2's reply — the LAST unit of the session, the exact bug
+		// shape: no later real user input exists to close the window.
+		const verdict = planDeletion(events, 6);
+		assert.equal(verdict.ok, true);
+		assert.equal(verdict.range.end, 9, "end must be lastEventSeq+1, not null");
+		assert.equal(planCoversLike(verdict.range, 8), true, "chrome inside the deleted unit stays covered");
+		assert.equal(planCoversLike(verdict.range, 9), false, "the clamp bound itself is exclusive");
+		assert.equal(planCoversLike(verdict.range, 100), false, "FUTURE appends must never fall inside");
 	});
 });

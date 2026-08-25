@@ -174,6 +174,21 @@ export function isDeletionPlaceholder(event) {
 		&& event.data.id.startsWith("deleted-");
 }
 
+/**
+ * Whether a user/message row is MACHINE-INJECTED context (source kind is
+ * present and explicitly not "user") — as opposed to a REAL user input or a
+ * sourceless row. Only rows with an explicit non-user source (plugin splices
+ * like the runtime-context note, skill-catalog reminders) act as unit
+ * triggers; a row without a source keeps single-node semantics.
+ */
+export function isMachineInjectedUserInput(event) {
+	return event.type === "user/message"
+		&& event.data?.source !== undefined
+		&& event.data?.source !== null
+		&& event.data.source.kind !== "user"
+		&& !isDeletionPlaceholder(event);
+}
+
 /** A REAL user input: typed by the user, not injected, not one of our placeholders. */
 export function isRealUserInput(event) {
 	return event.type === "user/message"
@@ -262,44 +277,68 @@ export function enclosingTurnBracket(events, seq) {
 }
 
 /**
- * Plan one deletion as the user perceives it: for an ASSISTANT target, the
- * unit is its USER-INPUT WINDOW — everything between the previous and the
- * next real user input (assistant messages, tool results, machine-injected
- * context). The transcript renders those as many separate rows (per-step
- * think/prose nodes, per-tool call nodes), so replacing only the closing
- * message left the wall of tool activity on screen while its final prose
- * vanished. Because the window is bounded by real user inputs BY
- * CONSTRUCTION, no user row can ever fall inside the hide range — the safety
- * property holds even on client paths that cannot see node kinds. Real user
- * inputs act as boundaries and are never members; steering splits windows.
- * Previously-shadowed members are skipped, so re-clicking a half-deleted
- * reply cleans up the rest in one action.
+ * Clamp a user-input window into a SAFE persistent hide-range for clients.
  *
- * A USER-message target keeps single-node semantics (clicking delete on your
- * own row must never erase anything else).
+ * The semantic window may be open on either side (`null` bound = "until the
+ * next/previous real user input"). Open sides are correct while ASSESSING the
+ * live log, but a range the CLIENT persists must never stay right-open: seqs
+ * only grow upward, so every reply appended AFTER the deletion point would
+ * fall inside an open-ended range forever — the sweeper would hide each newly
+ * streamed assistant row on sight ("delete the latest reply and the
+ * conversation never renders again"). Clamping the right side to
+ * `lastEventSeq + 1` keeps full coverage of everything that exists NOW —
+ * including chrome anchored after the last member (llm/retry chains,
+ * turn-error banners) — while excluding, by append-only monotonicity, every
+ * future event. A left-open bound is harmless once the right side is bounded:
+ * future rows exceed `end`, so they can never fall in from below.
+ *
+ * @param {readonly {seq: number}} events - full log, any order.
+ * @param {{start: number|null, end: number|null}|undefined} window - semantic window.
+ * @returns `{ start, end }` with `end` always a safe integer.
+ */
+export function boundClientWindow(events, window) {
+	if (!window) return window;
+	let lastSeq = -1;
+	for (const event of events) if (event.seq > lastSeq) lastSeq = event.seq;
+	return { start: window.start ?? null, end: window.end ?? lastSeq + 1 };
+}
+
+/**
+ * Plan the window-mode deletion shared by every UNIT trigger — assistant
+ * replies AND machine-injected context rows. The unit is the target's
+ * USER-INPUT WINDOW: everything between the previous and the next real user
+ * input (assistant messages, tool results, machine-injected context).
+ *
+ * The transcript renders a unit as many separate rows (per-step think/prose
+ * nodes, per-tool call nodes), so replacing only the closing message left the
+ * wall of tool activity on screen while its final prose vanished. Because the
+ * window is bounded by real user inputs BY CONSTRUCTION, no user row can ever
+ * fall inside the hide range — the safety property holds even on client paths
+ * that cannot see node kinds. Real user inputs act as boundaries and are
+ * never members; steering splits windows. Previously-shadowed members are
+ * skipped, so re-clicking a half-deleted reply cleans up the rest in one
+ * action.
+ *
+ * Why injected context is also a unit trigger: a turn that failed or was
+ * interrupted before any `assistant/message` landed (a 502 retry chain, a
+ * mid-stream abort) leaves only its machine-injected rows on the surface.
+ * They keep re-entering the model context on every later request, yet had no
+ * delete affordance — the assistant-actions seat mounts inside an assistant
+ * bubble that never existed. Treating an injected row as a unit trigger
+ * closes that gap without touching the real-user-input boundary invariant.
  *
  * @param {readonly any[]} events - the session's full event snapshot, in seq order.
  * @param {number} seq - the surface node the user asked to delete.
- * @returns `{ ok: true, mode: "single"|"turn", seqs: number[], range? }` or
+ * @param {"turn"|"unit"} mode - which trigger produced this plan (kept distinct so logs/clients can tell an assistant-reply delete from a context-row delete of the same window).
+ * @returns `{ ok: true, mode, seqs: number[], range }` or
  *   `{ ok: false, reason }` using the same REFUSALS vocabulary. `range`
- *   (turn mode) is the `{ start, end }` window bounds (either `null` when
- *   open-ended) for client-side chrome hiding — including non-surface
- *   tool/call rows that no replacement could ever cite.
+ *   is the `{ start, end }` window bounds RIGHT-BOUNDED via
+ *   {@link boundClientWindow} (never `null` on the end side) so a client may
+ *   persist it safely — covering every chrome row that exists today,
+ *   including non-surface tool/call rows no replacement could ever cite,
+ *   while never swallowing rows appended later.
  */
-export function planDeletion(events, seq) {
-	if (!Number.isSafeInteger(seq) || seq < 0) return { ok: false, reason: REFUSALS.NOT_FOUND };
-	const target = events.find((event) => event.seq === seq);
-	if (target === undefined) return { ok: false, reason: REFUSALS.NOT_FOUND };
-	if (!DELETABLE_TYPES.has(target.type)) return { ok: false, reason: REFUSALS.NOT_SURFACE_TYPE };
-
-	// User rows: exactly the old single-node contract, all its rules intact.
-	if (target.type === "user/message") {
-		const verdict = assessDeletion(events, seq);
-		return verdict.ok ? { ok: true, mode: "single", seqs: [seq] } : verdict;
-	}
-
-	// Assistant target: the whole user-input window. Safety while the agent is
-	// still working through the enclosing turn stays non-negotiable.
+function planUnitDeletion(events, seq, mode) {
 	const bracket = enclosingTurnBracket(events, seq);
 	if (bracket !== undefined && bracket.open) return { ok: false, reason: REFUSALS.OPEN_TURN };
 
@@ -314,7 +353,139 @@ export function planDeletion(events, seq) {
 	// The clicked node may already be shadowed (a prior partial delete); what
 	// matters is whether ANY live member of the unit remains to remove.
 	if (seqs.length === 0) return { ok: false, reason: REFUSALS.ALREADY_SHADOWED };
-	return { ok: true, mode: "turn", seqs, range: { start: window.start, end: window.end } };
+	return { ok: true, mode, seqs, range: boundClientWindow(events, window) };
+}
+
+/**
+ * Plan a STEP-level deletion: the owning assistant/message plus its directly
+ * paired tool/results — NOT the whole user-input window. Multi-step turns
+ * keep their other steps intact.
+ *
+ * The owning assistant/message is found by direct match (target IS one) or by
+ * scanning backward (tool/call summaries, tool/results and other chrome
+ * anchored after their calling reply). Collection then walks forward from the
+ * assistant message, gathering every live `tool/result` until the next
+ * `assistant/message`, real user input, or turn/end boundary. This is correct
+ * without parsing callIds because a valid log always places tool/results
+ * immediately after their calling reply.
+ *
+ * Machine-injected context rows between steps are deliberately KEPT — they
+ * belong to the step's environment, not to the assistant's work product.
+ *
+ * @returns `{ ok:true, mode:"step", seqs, range:{start, end} }` where range
+ *   covers this step's tool/call chrome rows for client-side hiding.
+ */
+export function planStepDeletion(events, seq) {
+	if (!Number.isSafeInteger(seq) || seq < 0) return { ok: false, reason: REFUSALS.NOT_FOUND };
+	const target = events.find((event) => event.seq === seq);
+	if (target === undefined) return { ok: false, reason: REFUSALS.NOT_FOUND };
+
+	// 1. Find the owning assistant/message.
+	let assistantSeq = null;
+	if (DELETABLE_TYPES.has(target.type) && target.type === "assistant/message") {
+		assistantSeq = seq;
+	} else {
+		for (const e of [...events].reverse()) {
+			if (e.seq >= seq) continue;
+			if (e.type === "assistant/message") { assistantSeq = e.seq; break; }
+			if (e.type === "user/message" && isRealUserInput(e)) break;
+		}
+	}
+	if (assistantSeq === null) return { ok: false, reason: REFUSALS.NOT_FOUND };
+
+	// 2. Open-turn guard.
+	const bracket = enclosingTurnBracket(events, seq);
+	if (bracket !== undefined && bracket.open) return { ok: false, reason: REFUSALS.OPEN_TURN };
+
+	// 3. Collect the assistant message + its paired tool/results.
+	const seqs = [];
+	let maxSeq = assistantSeq;
+	let collecting = false;
+	for (const e of events) {
+		if (e.seq < assistantSeq) continue;
+		if (e.seq === assistantSeq) {
+			collecting = true;
+			if (!shadowedBy(events, e.seq)) seqs.push(e.seq);
+			continue;
+		}
+		if (!collecting) continue;
+		if (e.type === "assistant/message") break;
+		if (e.type === "user/message" && isRealUserInput(e)) break;
+		if (e.type === "turn/end") break;
+		if (e.type === "tool/result" && !shadowedBy(events, e.seq)) {
+			seqs.push(e.seq);
+			if (e.seq > maxSeq) maxSeq = e.seq;
+		}
+	}
+
+	if (seqs.length === 0) return { ok: false, reason: REFUSALS.ALREADY_SHADOWED };
+	return { ok: true, mode: "step", seqs, range: { start: assistantSeq, end: maxSeq } };
+}
+
+/**
+ * Plan one deletion as the user perceives it.
+ *
+ * Trigger kinds and modes:
+ *
+ * - A REAL user input (typed by the user, not injected, not one of our
+ *   placeholders) keeps single-node semantics — clicking delete on your own
+ *   row must never erase anything else.
+ * - An ASSISTANT message expands to its whole user-input window
+ *   (mode `"turn"`).
+ * - A MACHINE-INJECTED `user/message` (source kind is not `"user"`, e.g. the
+ *   plugin/skill-catalog context rows) expands to the same window
+ *   (mode `"unit"`). This is the entry point for turns that failed or were
+ *   interrupted before any assistant reply landed: their injected rows are
+ *   the only deletable surface left, so without a unit trigger they would
+ *   pollute the model context forever.
+ * - ANY OTHER event seq — the transcript also renders rows anchored at
+ *   NON-surface events (tool/call summaries, retry-chain entries, turn
+ *   errors), and a trash click there has no surface node to cite. These act
+ *   as window-unit triggers too (mode `"unit"`): same window, same members,
+ *   same refusal rules. The window bounds stay real user inputs either way.
+ * - With `scope === "step"`, an assistant/message target (or any anchor that
+ *   resolves backward to one) deletes ONLY that step: the assistant message
+ *   plus its paired tool/results — other steps in the same window survive
+ *   (mode `"step"`). Used by Think-card and tool-call-card trash buttons for
+ *   granular control in multi-step turns.
+ *
+ * @param {readonly any[]} events - the session's full event snapshot, in seq order.
+ * @param {number} seq - the surface node (or chrome anchor) the user asked to delete.
+ * @param {string} [scope] - optional deletion scope: `"step"` for per-step granularity; omit for legacy routing.
+ * @returns `{ ok: true, mode: "single"|"turn"|"unit"|"step", seqs: number[], range? }` —
+ *   `range` (turn/unit/step) is always RIGHT-BOUNDED for safe client persistence.
+ */
+export function planDeletion(events, seq, scope) {
+	if (!Number.isSafeInteger(seq) || seq < 0) return { ok: false, reason: REFUSALS.NOT_FOUND };
+
+	if (scope === "step") return planStepDeletion(events, seq);
+
+	const target = events.find((event) => event.seq === seq);
+	if (target === undefined) return { ok: false, reason: REFUSALS.NOT_FOUND };
+
+	// User 行：真实用户输入（source.kind === "user"）或缺少 source 的行保持
+	// 单节点契约；只有显式非 user 源的机器注入行（插件拼接如运行时上下文
+	// 注记、skill-catalog 提醒）才是单元触发器——让失败/中断回合滞留的注入
+	// 行也能用与助手回复相同的窗口语义一次清理。
+	if (target.type === "user/message") {
+		if (isMachineInjectedUserInput(target)) {
+			return planUnitDeletion(events, seq, "unit");
+		}
+		const verdict = assessDeletion(events, seq);
+		return verdict.ok ? { ok: true, mode: "single", seqs: [seq] } : verdict;
+	}
+
+	// Assistant target: the whole user-input window.
+	if (DELETABLE_TYPES.has(target.type)) {
+		return planUnitDeletion(events, seq, "turn");
+	}
+
+	// Chrome anchor (tool/call summary, llm/retry row, turn error, …): the
+	// rendered row cites a NON-surface event, so there is nothing to replace
+	// at this seq itself — but the row visibly belongs to a user-input window,
+	// and deleting that whole unit is exactly what the click means. Same
+	// window semantics as every other unit trigger; open turns still refuse.
+	return planUnitDeletion(events, seq, "unit");
 }
 
 /**

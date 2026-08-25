@@ -33,7 +33,15 @@
  * @module dsh-delete-message/plugin
  */
 
-import { assessDeletion, buildPlaceholder, planDeletion, REFUSALS, turnUnitCleared, userWindowOf } from "./surface.js";
+import {
+	assessDeletion,
+	boundClientWindow,
+	buildPlaceholder,
+	planDeletion,
+	REFUSALS,
+	turnUnitCleared,
+	userWindowOf
+} from "./surface.js";
 import { VERSION, registerRoutes } from "./http.js";
 
 export { VERSION };
@@ -65,18 +73,22 @@ const PLACEHOLDER_EN = "[message deleted by user]";
  * @param {string | undefined} sessionId - target session id.
  * @param {string | undefined} seqParam - candidate surface node seq.
  */
-export async function buildStatus(sessions, sessionId, seqParam) {
+export async function buildStatus(sessions, sessionId, seqParam, scope) {
 	const session = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
 	if (session === undefined) return { ok: true, live: false, reason: "session-not-live" };
 	const seq = Number(seqParam);
-	const verdict = planDeletion(session.events, seq);
+	const verdict = planDeletion(session.events, seq, typeof scope === "string" && scope !== "" ? scope : undefined);
 	// Window chrome: ANY seq reports its user-input window and whether the
 	// whole unit is already deleted — that is how a client heals rows (tool/call
-	// summaries) that no surface replacement could ever cite. Because the
-	// window is bounded by real user inputs, no real user row can ever be
-	// covered by it.
-	const window = userWindowOf(session.events, seq);
-	const windowCleared = turnUnitCleared(session.events, window);
+	// summaries) that no surface replacement could ever cite. The client
+	// PERSISTS this window into its deletion ledger, so it must be
+	// RIGHT-BOUNDED (boundClientWindow): an open-ended window would cover every
+	// row appended after the delete point and hide all future replies. Because
+	// the left bound is a real user input (or the log head once bounded on the
+	// right), no real user row can ever be covered by it.
+	const semanticWindow = userWindowOf(session.events, seq);
+	const windowCleared = turnUnitCleared(session.events, semanticWindow);
+	const window = boundClientWindow(session.events, semanticWindow);
 	return {
 		ok: true,
 		live: true,
@@ -114,7 +126,8 @@ export async function deleteMessage(sessions, loggerLike, body) {
 	if (session === undefined) return { ok: false, error: REFUSALS.NOT_FOUND, detail: "session-not-live" };
 
 	const events = session.events;
-	const verdict = planDeletion(events, seq);
+	const scope = typeof body?.scope === "string" && body.scope !== "" ? body.scope : undefined;
+	const verdict = planDeletion(events, seq, scope);
 	if (!verdict.ok) {
 		return { ok: false, error: verdict.reason };
 	}
@@ -173,7 +186,7 @@ export function apply(ctx) {
 	registerRoutes(ctx, {
 		logger,
 		sessions,
-		buildStatus: (sessionId, seq) => buildStatus(sessions, sessionId, seq),
+		buildStatus: (sessionId, seq, scope) => buildStatus(sessions, sessionId, seq, scope),
 		deleteMessage: (body) => deleteMessage(sessions, { logger }, body)
 	});
 }
