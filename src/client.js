@@ -165,15 +165,15 @@ window.__ModuleLoader__.load({
 			confirmTitleStep: "Delete this step?",
 			confirmBodyStep: "This step's thinking, reply, and tool calls will be removed; the raw log is kept for recovery.",
 			tooltipStep: "Delete this step",
-			confirmTitleWindow: "Delete entire attempt?",
-			tooltipWindow: "Delete entire attempt",
+			confirmTitleWindow: "Delete this entire attempt?",
+			tooltipWindow: "Delete this entire attempt",
 			confirmBodyAssistant: "This reply will be removed together with its thinking, tool calls, and injected context; the raw log is kept for recovery.",
 			// Context-row trigger: the trash sits on a machine-injected row (the
 			// "Context injection" panel). Clicking it deletes the WHOLE reply unit
 			// of that window — every injected context row, any assistant reply and
 			// tool results in it, plus the retry/abort chrome — so it is also how
 			// a turn that failed before any assistant reply landed gets cleaned up.
-			confirmBodyContext: "This failed attempt will be removed entirely: its injected context, any reply and tool calls, and the retry log; the raw log is kept for recovery.",
+			confirmBodyContext: "The entire attempt will be removed: its injected context, replies, tool calls, and retry records; the raw log is kept for recovery.",
 			// Fallback for an unknown role (defensive; both call sites pass one).
 			confirmBody: "This message will be removed from the conversation and the model context (the raw log is kept for recovery).",
 			cancel: "Cancel",
@@ -192,12 +192,31 @@ window.__ModuleLoader__.load({
 		};
 
 		/**
-		 * The host locale service resolves via browser languages plus a Host
-		 * preference. The DOM-enhancement path has no hook into that face, so it
-		 * repeats the documented browser heuristic; the React path always uses
-		 * the kit's real translator instead.
+		 * Locale resolution for the DOM-enhancement path, which has no hook into
+		 * the kit's real translator. Mirrors the host LocaleRuntime's resolution:
+		 *
+		 * 1. `<html lang>` — the host locale plugin writes the ACTIVE locale here
+		 *    at boot and again on EVERY switch (`zh-CN` / `en`, see
+		 *    dsh-client-locale syncDocumentLanguage), so reading it follows the
+		 *    system-settings "Language" choice live. The v0.2.0 heuristic below
+		 *    ignored this signal entirely: an English host setting over a
+		 *    Chinese-first browser kept rendering our tooltips/dialogs in
+		 *    Chinese forever.
+		 * 2. Browser languages — same primary-subtag scan the host runs for its
+		 *    provisional locale when no explicit preference exists.
+		 * 3. `en` — parity with the host's FALLBACK_LOCALE: a browser naming
+		 *    neither shipped language is likelier to read English.
 		 */
 		function detectDomLocale() {
+			try {
+				const docLang = document.documentElement?.getAttribute?.("lang");
+				if (typeof docLang === "string" && docLang !== "") {
+					const primary = docLang.toLowerCase().split("-")[0];
+					if (primary === "zh" || primary === "en") return primary;
+				}
+			} catch {
+				// document unavailable — fall through to the browser scan.
+			}
 			try {
 				for (const tag of [...(navigator.languages ?? []), navigator.language]) {
 					if (typeof tag !== "string") continue;
@@ -207,7 +226,7 @@ window.__ModuleLoader__.load({
 			} catch {
 				// navigator unavailable — fall through to the default below.
 			}
-			return "zh";
+			return "en";
 		}
 
 		/** Minimal translator over the registered dictionaries. */
@@ -1881,10 +1900,16 @@ button[data-dsh-delete-icon][data-dshdm-gray]{opacity:.35;cursor:not-allowed}
 			// now also handles chrome kinds via the anchor probe.
 			rowSeqCache.set(wrapper, seq);
 
+			// Scope-aware label, shared by the aria-label AND the hover bubble:
+			// screen readers get the same blast radius sighted users see before
+			// clicking (step cards delete one step; metadata rows clean the
+			// whole attempt).
+			const tooltipKey = (kind === "tool-call" || kind === "assistant-step") ? "tooltipStep" : "tooltipWindow";
+
 			const trash = document.createElement("button");
 			trash.type = "button";
 			trash.className = ACTION_CLASS;
-			trash.setAttribute("aria-label", t("deleteAria"));
+			trash.setAttribute("aria-label", t(tooltipKey));
 			trash.setAttribute("data-dsh-delete-icon", "");
 			// Chrome-row icons stay hidden until their message row is hovered
 			// (user/assistant action strips keep the host's own reveal behavior).
@@ -1912,7 +1937,7 @@ button[data-dsh-delete-icon][data-dshdm-gray]{opacity:.35;cursor:not-allowed}
 				trash.style.flex = "none";
 			}
 			// Scope-aware tooltip: the user sees the blast radius BEFORE clicking.
-			const tooltipKey = (kind === "tool-call" || kind === "assistant-step") ? "tooltipStep" : "tooltipWindow";
+			// (tooltipKey is computed above and shared with the aria-label.)
 			// Preflight icon state, lazily on first reveal (the label getter runs
 			// on hover/focus) and again at click time — never polled. The verdict
 			// is SCOPE-dependent, so it uses this row's own scope key: step cards
@@ -2406,8 +2431,15 @@ button[data-dsh-delete-icon][data-dshdm-gray]{opacity:.35;cursor:not-allowed}
 			}
 
 			// Mount 2 — user rows (DOM enhancement).
+			// Per-call dispatch instead of a startup-frozen dictionary pick:
+			// hover bubbles are lazy label getters and dialogs assemble at click
+			// time, so every lookup re-reads the host's <html lang> and a switch
+			// of the system-settings Language lands on the very next hover or
+			// click — no reload needed.
+			const tZh = translateWith(zh);
+			const tEn = translateWith(en);
 			try {
-				startDomEnhancement(sessionIds, detectDomLocale() === "en" ? translateWith(en) : translateWith(zh));
+				startDomEnhancement(sessionIds, (key, params) => (detectDomLocale() === "en" ? tEn : tZh)(key, params));
 			} catch (error) {
 				console.error("[delete-message] DOM enhancement failed to start:", error);
 			}
