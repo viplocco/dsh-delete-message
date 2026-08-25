@@ -1,6 +1,6 @@
 {
   "name": "dsh-delete-message",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Per-message delete for DeepSeek Harness — a trash icon beside the copy button on every chat message that removes that message from the derived model context (and the visible transcript) via the official surface-replace contract",
   "type": "module",
   "license": "MIT",
