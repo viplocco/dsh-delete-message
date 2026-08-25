@@ -1,6 +1,6 @@
 # dsh-delete-message 技术方案
 
-状态：**v0.1 设计定稿（骨架已落地，集成验证待做）**。本文档记录"为什么这样设计"，包括每一条被否决的路——被否决的路比选中的路更值得写下来，因为下一次迭代最先想试的就是它们。
+状态：**v0.2.0 已发版（2026-08-29，GitHub tag `v0.2.0`）**。本文档记录"为什么这样设计"，包括每一条被否决的路——被否决的路比选中的路更值得写下来，因为下一次迭代最先想试的就是它们。
 
 ---
 
@@ -199,8 +199,8 @@ v0.1.2 收紧了两条防重复规则：**(a)** 候选条带只取悬停根的�
 
 | 路由 | 方法 | 语义 |
 | --- | --- | --- |
-| `/api/delete-message/status?sessionId&seq` | GET | 预检：live + deletable + 原因码（UI 决定图标态） |
-| `/api/delete-message/delete` | POST `{sessionId, seq}` | 重跑校验 → `session.append('user/message', 占位, {surfaceOp:{replace,seq,seq}, sourceEventSeqs:[seq]})` |
+| `/api/delete-message/status?sessionId&seq[&scope]` | GET | 预检：live + deletable + 原因码 + mode/count；另带该 seq 的用户输入窗口 `window`（**恒右界**，§4.8）与 `windowCleared`，供客户端治愈无引用可查的 chrome 行 |
+| `/api/delete-message/delete` | POST `{sessionId, seq[, scope]}` | 重跑校验 → 按 plan **逐成员** append 占位 replace（v0.1.3 起）；响应带 `replaced/mode/range`（range 恒右界） |
 
 安全：回环 socket 地址（观察值而非 Host 头）+ 本机 Host 头双条件；body 大小上限；错误带 stack 进 logger.error（HOST-CONTRACT § 5 的教训：吞掉的异常要长得像 bug）。
 
@@ -221,11 +221,11 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
 - [x] ~~占位 `user/message` data 形状对照真实日志事件确认~~ —— v0.1.1 以最疼的方式完成了这项验证（见 §5.1）：缺 `source` 导致整个会话历史加载失败；
 - [x] ~~删除后浏览器快照推送是否触发转录重渲染~~ —— 问题本身问错了：宿主转录**按设计只由 append-origin 事件构成**，replace 既不移除原行也不渲染占位行（见 §2"可见转录的真相"）。视觉消失由插件客户端台账 + 清扫器实现，不依赖任何刷新动作；
 - [x] ~~`sessionIdOf()`（DOM 路径取当前会话 id）接上运行时的实际 accessor~~ —— v0.1.2 首版注入 `sessions` 服务实测翻车：插件 fiber 拿到的是惰性取值器，一访问就抛 `cannot get required service "sessions" in inactive context`（点击时成为未捕获拒绝）。终稿改为**纯被动捕获**：助手槽组件渲染时上报 kit 的 `sessionId`，DOM 路径在 fiber 上溯时顺手收集 `props.sessionId`——不 resolve 任何服务，无从抛错；
-- [ ] 安装链路：本地 `link:` 或 Copy-Item 到 profile 安装副本 → `--dump-config` 出现 `# == dsh-delete-message` → `/plugins/dsh-delete-message/client.js` 200 → 重启宿主进程。
+- [x] ~~安装链路：本地 `link:` 或 Copy-Item 到 profile 安装副本 → `--dump-config` 出现 `# == dsh-delete-message` → `/plugins/dsh-delete-message/client.js` 200 → 重启宿主进程~~ —— 全链路实测通过，此后每波改动均以 Get-FileHash 复核工作区与安装副本一致后部署；v0.2.0 起 GitHub tag 安装可用（`dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.0`）。
 
 ## 7. 版本路线
 
-- **v0.1**（本仓库当前）：单条删除（保守规则集）、确认流、占位替换、i18n（zh/en）、测试 39 例。
+- **v0.1**：单条删除（保守规则集）、确认流、占位替换、i18n（zh/en）、测试 39 例。
 - **v0.1.1**：占位补 `source: { kind: "user" }`（§5.1 回归修复），测试 40 例。
 - **v0.1.2**：UI 一致性修复——助手侧条目因单参 `jsx()` 崩溃被错误边界静默退位（按钮"消失"）改写为 feedback 同款注册形态；用户侧条带识别收紧到直接子级 + 幂等标记（消灭重复图标）；官方垃圾桶图标几何、28×28 操作钮样式值、Tooltip 复刻气泡、Modal+Button 复刻确认弹窗全面对齐宿主语言；DOM 路径会话 id 接 `sessions.selected`。测试 44 例 + 渲染冒烟（scripts/smoke-render.mjs，用宿主同款 React 18.3.1 真渲染 slot 组件）。
 - **v0.1.3**：四个实测回归的修复——
@@ -233,8 +233,8 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
   2. **失败原因显示原始错误码**（如字面 "already-shadowed"）：宿主 `LocaleRuntime.lookup` 只做一层键查找，嵌套 `reason: {}` 永远查不中。词典改扁平点号键，`translateWith` 先平查再逐级走。
   3. **用户行点击直接弹原生 alert**：点击处理器先查被动捕获的会话 id、后跑 fiber——页面重载后捕获为空时没找就拒绝。改为先解析（多锚点：条带内宿主按钮 → 行包装器探测链）并顺带喂捕获，再校验；所有拒绝/失败统一走复刻 Modal 的通知弹窗，原生 alert 全部退役。
   4. **确认文案按角色自动判定 + 英文全量润色**（§4.3）：`runDelete` 增加静态 `role` 参数，词典拆出 `confirmBodyUser/confirmBodyAssistant`，"若为助手回复"条件句退役；英文 UI 文案整轮完善（`noticeOk` "Got it"→"Dismiss"，全部 `reason.*` 改完整陈述句并统一标点）。冒烟脚本同步两处：台账断言从 v1 裸数组修正为 v2 `{s,r}` 形状（v0.1.3 第 1 项落地时的漏网旧断言），新增角色化文案键的存在性检查。
-- **v0.1.4**（当前发版）：**删除回复吞掉相邻用户输入**（§4.4 回归修复，仅客户端半区，硬刷新生效）——`ledgerHas` 对回合窗口闭区间比较（边界即真用户输入的 seq，null 还被强转成 0）、`ledgerMarkRange` 相切合并、preflight `windowCleared` 不分角色，三条路径合谋把窗口两侧的用户行当 chrome 隐藏。修复：开区间语义统一、相切不合并、清扫器按节点角色放行真用户行；冒烟脚本新增四条区间契约断言。
-- **v0.1.5**（未发版）：**失败/中断回合可清理 + chrome 行垃圾桶**——
+- **v0.1.4**（已发版）：**删除回复吞掉相邻用户输入**（§4.4 回归修复，仅客户端半区，硬刷新生效）——`ledgerHas` 对回合窗口闭区间比较（边界即真用户输入的 seq，null 还被强转成 0）、`ledgerMarkRange` 相切合并、preflight `windowCleared` 不分角色，三条路径合谋把窗口两侧的用户行当 chrome 隐藏。修复：开区间语义统一、相切不合并、清扫器按节点角色放行真用户行；冒烟脚本新增四条区间契约断言。
+- **v0.1.5**（曾长期未发版，最终随 v0.2.0 一并发布）：**失败/中断回合可清理 + chrome 行垃圾桶**——
   1. **unit 模式（服务端）**：502 重试耗尽这类回合往往没有 `assistant/message`，助手侧槽位无处安放、注入行永久滞留上下文。`planDeletion` 新增 `unit` 模式：显式非 user 源的注入行与助手消息同样按用户输入窗口整单元计划（真实用户输入/无 source 行保持 single；占位符路由回 assessDeletion 得到 already-shadowed，行为不变）。
   2. **chrome 锚点（服务端）**：转录还渲染以**非表面事件**为锚的行——tool/call 摘要卡、llm/retry 重试行、turn-error 横幅。这些 seq 本身无可替换节点，`planDeletion` 将其一律作为窗口单元触发器处理（同 unit：同窗口、同成员、open-turn 照拒）。真实日志验证 tool/call 与 llm/retry 锚点得到同一份窗口计划。
   3. **客户端挂载泛化**：宿主 `ChatNodeSeat` 包装器自带 `[data-chat-flow-kind]`，kind 门控零 fiber 成本；按 kind 选锚点——context → DisclosureRow 头部 `[data-disclosure-row]`，tool-call → 根卡片 `[data-chat-call-id]`（垃圾桶浮动右上角，实测不遮挡内容），model-retry → `<details><summary>`，turn-error → `role=status` 横幅。幂等判据是**按钮存在性**而非标记（React 流式重建行会丢弃旧子树，持久标记会让图标永不复挂——实测回归教训）；STRIP_MARK 仅作 stray 清扫合法性标记随锚点走；`[data-context-source]` 作为冗余 fiber 锚点。stray 清扫规则改为"父挂载点必须带本插件标记"，助手槽位隐藏计划的 range 不再限定 mode==="turn"。确认文案：context 触发用 `confirmBodyContext`，其余 chrome 用 `confirmBodyAssistant`。
@@ -243,8 +243,9 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
   6. **chrome 行按钮悬停显隐**：样式表新增 `[data-chat-flow-key]:hover` 触发规则，chrome 按钮打 `data-dshdm-autohide` 标记，默认 `visibility:hidden`（真正不可点击，防误触）+ `:focus-visible` 键盘可达；用户/助手消息操作条按钮（宿主原生悬停显隐）不动。实机用 CDP 真实 `mouseMoved` 验证：指针移开 `hidden` → 移入 `visible` → 移出 `hidden`（合成 mouseover 事件不会激活 `:hover` 伪类，测不到此行为）。
   7. **删除后即时隐藏回归修复**：v0.1.5 的锚点即探针修只补了 `enhanceChromeRow`，漏了 `resolveWrapperSeq`——而 `hideRowsBySeq` 在删除成功后正是经它解析 chrome 行 seq，解析失败→`planCovers(undefined)`→不设 `HIDDEN_MARK`→行不消失直到刷新。修复：`resolveWrapperSeq` 对 chrome 行同样优先走锚点探针，且 `enhanceChromeRow` 解析成功后把 seq 缓存进 `rowSeqCache` 供 `hideRowsBySeq` 直取。非破坏实机验证：tool-call 39/39、context 4/4、model-retry 6/6 全部经锚点解析出数字 seq（修复前全为 undefined）。
   测试 74 例（surface 39 + http 11 + packaging 24，新增 chrome 锚点 5 例 + 样式/锚点断言 1 例），真实日志只读验证 single/unit 路由符合预期。smoke-render.mjs 的 react-dom 解析改为多候选根回退（host 的 npm 布局会 re-hoist react-dom）。
-- **v0.2**（进行中）：**步骤级删除**——多步回合中点击 Think 卡或工具调用卡的垃圾桶只删该步骤（`assistant/message` + 配对 `tool/result`），同窗口其他步骤保留。服务端 `planDeletion` 新增 `scope:"step"` 路由到 `planStepDeletion`：向前扫描找到所属 assistant/message，收集其 + 后续 tool/result（遇下一条 assistant/message、真实用户输入或 turn/end 停止）；range = {start:assistantSeq, end:maxSeq} 供客户端隐藏该步骤的 tool/call chrome。POST body / GET query 新增可选 `scope` 字段；不带 scope 向后兼容现有路由。客户端按 kind 分发 scope：tool-call / assistant-step → "step"（confirmTitleStep + confirmBodyStep + tooltipStep），context → 缺省（confirmTitleWindow + confirmBodyContext + tooltipWindow），model-retry / turn-error → 缺省（confirmTitleWindow + confirmBodyAssistant + tooltipWindow）。弹窗标题、正文、tooltip 三层标注范围。
+- **v0.2.0**（当前发版，2026-08-29）：**步骤级删除**——多步回合中点击 Think 卡或工具调用卡的垃圾桶只删该步骤（`assistant/message` + 配对 `tool/result`），同窗口其他步骤保留。服务端 `planDeletion` 新增 `scope:"step"` 路由到 `planStepDeletion`：向前扫描找到所属 assistant/message，收集其 + 后续 tool/result（遇下一条 assistant/message、真实用户输入或 turn/end 停止）；range = {start:assistantSeq, end:maxSeq} 供客户端隐藏该步骤的 tool/call chrome。POST body / GET query 新增可选 `scope` 字段；不带 scope 向后兼容现有路由。客户端按 kind 分发 scope：tool-call / assistant-step → "step"（confirmTitleStep + confirmBodyStep + tooltipStep），context → 缺省（confirmTitleWindow + confirmBodyContext + tooltipWindow），model-retry / turn-error → 缺省（confirmTitleWindow + confirmBodyAssistant + tooltipWindow）。弹窗标题、正文、tooltip 三层标注范围。
   另：**性能审计落地**（§4.5）——模块级每快照修订去重门，把删除后台账非空时每次快照修订的清扫成本从 C×O(转录) 收敛为 O(转录)；**删除前预检缓存与图标置灰**（§4.6）——共享 TTL 判定缓存 + 三挂载点拒绝置灰/点击即原因；**删除过渡反馈**（§4.7）——确认弹窗 pending 态（spinner + 防重复提交 + 内联失败可重试）+ 行退场级联动画。均为纯 client 半区，硬刷新生效。
   另：**右开窗口持久化回归修复**（§4.8，2026-08-29）——删除末回合回复后继续对话，助手新回复全部被清扫器吞掉。服务端 `boundClientWindow` 把计划 range 与 /status window 钳到 lastEventSeq+1（宿主半区，需重启），客户端拒收右开范围 + 加载时消毒遗留台账（client 半区，硬刷新）。测试 89 例 + smoke 全绿。
+  **发布记录（2026-08-29）**：提交 `6bb8730`(feat: src+test+smoke) → `d1289b6`(docs: README 双语补预检置灰/过渡反馈特性 + 新截图 + DESIGN.md §4.5–4.8) → `e787c06`(chore release)；annotated tag `v0.2.0` 中文注释随 main 推送 GitHub 并复核远端引用。安装副本五文件（src×4 + package.json）SHA256 一致、版本同步 0.2.0；生效需重启 dsh web 进程 + 浏览器硬刷新。
 - **撤销（对占位再 append 一个反向引用？评估可行性）。**（原同条目的"删除前预检缓存与图标置灰"已落地，见 §4.6）
 - **v1.0**：冷会话支持（fork-rebuild：inspect 全量 → 过滤 → 新会话 + 打开），若宿主届时提供原生编辑缝则迁移过去。
