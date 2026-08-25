@@ -11,11 +11,11 @@ A per-message delete plugin for DeepSeek Harness that keeps accidental or mistak
 - **Context-level deletion** — after confirmation, a `surfaceOp: { op: 'replace' }` placeholder node is appended (the same mechanism as the host's `/compact`); shadowed messages no longer enter `deriveMessages()`.
 - **Transcript-level hiding** — the host's visible transcript is append-only by design, so the plugin maintains a per-session deleted-seq ledger (persisted in localStorage), resolves row wrappers' React fiber identities to hide matching rows, and heals historically deleted rows unknown to this browser via a `/status` preflight at load time.
 - **Failed-turn cleanup** — turns that failed or were interrupted before any assistant reply landed (e.g. a 502 retry exhaustion) leave no assistant message, so the delete button had nowhere to mount and the injected context was stranded forever. Clicking the trash on any context row, tool-call card, or retry line replaces the **whole user-input unit** at once (injections, the reply, tool calls, and retry/error chrome go together; real user input is never touched).
-- **Step-level deletion** — in multi-step turns, clicking the trash on a THINK card or tool-call card removes **only that step's** reply and tool calls (`assistant/message` + paired `tool/result`); other steps in the same window survive. The confirm title and tooltip explicitly state the scope ("Delete this step" vs "Delete entire attempt").
+- **Step-level deletion** — in multi-step turns, clicking the trash on a THINK card or tool-call card removes **only that step's** reply and tool calls (`assistant/message` + paired `tool/result`); other steps in the same window survive. The confirm title and tooltip explicitly state the scope ("Delete this step" vs "Delete this entire attempt").
 - **Role-aware confirmation** — the confirm dialog body is selected automatically from each mount's static message role; no user judgment required: a user message states its single-message scope, while an assistant reply states that its thinking, tool calls, and injected context are removed together with it.
 - **Preflight verdicts & graying** — trash targets are checked through a TTL-cached `/status` preflight on hover/click: refused targets gray out and state the localized reason instead of firing a doomed request; already-deleted rows heal silently; an unreachable host leaves icons neutral and clickable (the server always has final say).
 - **Delete transition feedback** — after confirming, the dialog enters a "Deleting…" pending state (spinner, with duplicate clicks and cancellation suppressed); failures show inline and can be retried in place; success collapses the affected rows with a graceful staggered leave animation (honors the system reduced-motion setting).
-- **Bilingual UI (zh/en)** — all UI copy (confirm dialogs, failure reasons, accessibility labels) ships with Chinese and English dictionaries, switched by browser language and host preference.
+- **Bilingual UI (zh/en)** — all UI copy (confirm dialogs, failure reasons, accessibility labels) ships with Chinese and English dictionaries, following the Language choice in system settings live; falls back to the browser languages when unset.
 
 ## Behavior Reference
 
@@ -51,7 +51,7 @@ Clicking the trash in different locations produces different deletion scopes, di
 ## Installation (web profile)
 
 ```sh
-dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.0
+dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.1
 ```
 
 After installing, **fully restart the DSH Web process** (the host-side plugin tree is read only at startup); the client bundle is served dynamically per request by the host, so updates take effect on a hard refresh.

@@ -194,6 +194,24 @@ v0.1.2 收紧了两条防重复规则：**(a)** 候选条带只取悬停根的�
 
 **契约修订**：`planDeletion` 返回的 `range` 与 `/status` 的 `window` 自此**恒有安全整数右界**（此前文档允许 null 开侧）；smoke 中"null end 必须是开放侧"的旧断言反转为"必须拒收"。普适教训：**凡是会被客户端持久化的范围/区间，绝不能带开放边界**——评估时的开侧语义只属于服务端当下的全量视图，一旦跨进程/跨时间传输就必须钳到已知数据的边界。
 
+### 4.9 回归记录：DOM 路径无视系统设置的语言选择（2026-08-29 落地）
+
+**症状（用户报告）**：在系统设置的"语言"里切到 English 后，插件的悬停气泡、确认弹窗、失败通知等仍显示中文。
+
+**根因（两条渲染路径的翻译器来源不同步）**：
+1. **助手槽位路径无恙**：注册项声明 `locale: NS` 换取宿主 LocaleRuntime 的真绑定翻译器，随 `locale/change` 事件经 useSyncExternalStore 实时跟随设置。
+2. **DOM 增强路径自定 heuristic 且启动定格**：`startDomEnhancement` 的翻译器在 apply 时一次性按 `detectDomLocale()` 选定——旧实现只扫 `navigator.languages`（浏览器语言），**从不读宿主的"语言"偏好**。浏览器 zh 优先的用户即使把系统设置切成 English，用户行/chrome 行的悬停气泡与全部弹窗通知永远停在中文。而插件的主要交互面（用户行垃圾桶、Think 卡、工具卡等）恰全在 DOM 路径上。
+
+**宿主机制核实（dsh-client-locale）**：LocaleRuntime 在 apply 时和每次 `publish(active, true)` 都调 `syncDocumentLanguage(active)` 把当前语区写进 `<html lang>`（映射 `zh→zh-CN`、`en→en`）；无显式偏好的临时语区按浏览器 primary 子标签解析；兜底 `FALLBACK_LOCALE = "en"`。
+
+**修复（client.js，两处）**：
+- `detectDomLocale()` 解析链对齐宿主：① `<html lang>` primary 子标签（宿主权威信号，启动即写、切换即改）→ ② 浏览器语言扫描（同宿主 provisional 规则）→ ③ 兜底从 `"zh"` 改为 `"en"`（对齐宿主 FALLBACK_LOCALE——两种发行语言都不命中的浏览器更可能读英文）。
+- DOM 翻译器从"启动时定格词典"改为**逐次取词分派**：`(key, params) => (detectDomLocale() === "en" ? tEn : tZh)(key, params)`。悬停气泡本是惰性 label getter、弹窗在点击时组装，因此系统设置切换语言后**下一次悬停/点击即生效**，无需刷新页面或重建按钮。
+
+**边界说明**：已挂载垃圾桶的 `aria-label` 在挂载时定格，语言切换后滞后到该行被 React 重建才更新（可见面——气泡/弹窗/通知——全部即时）；助手槽位的 React 面本就实时。smoke 对 `detectDomLocale` 的既有契约断言（返回非空字符串）不受影响。
+
+**验证**：89 例单测 + smoke 全绿。纯 client 半区，硬刷新生效。
+
 
 ## 5. Host API
 
