@@ -51,10 +51,29 @@ Clicking the trash in different locations produces different deletion scopes, di
 ## Installation (web profile)
 
 ```sh
-dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.1
+dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.2
 ```
 
 After installing, **fully restart the DSH Web process** (the host-side plugin tree is read only at startup); the client bundle is served dynamically per request by the host, so updates take effect on a hard refresh.
+
+## Installation (desktop profile)
+
+The DSH Desktop shell renders the **same web frontend** (the `@deepseek-ai/dsh-web-app` composition + the same WebServer origin), so this plugin is natively desktop-compatible — the only requirement is installing it into the desktop-owned profile and restarting DSH Desktop:
+
+```sh
+# The desktop app uses a separate desktop profile; install it there too
+dsh plugin --profile desktop add github:viplocco/dsh-delete-message#v0.2.2
+# or from a local checkout: dsh plugin --profile desktop add link:<path>
+```
+
+After installing, **fully restart DSH Desktop** and hard-refresh the renderer. To confirm it loaded:
+
+```sh
+dsh --profile desktop --dump-config   # should show a "# == dsh-delete-message" section
+# in the renderer devtools console: "[delete-message] bundle script executing"
+```
+
+> **Why "web worked but desktop didn't":** the plugin's host half used to read `session.events`, which the current harness (`dsh-session` ≥ 0.1.2-rc.1, bundled by DSH Desktop) renamed to `session.snapshotEvents()`, so `/status` threw `Cannot read properties of undefined (reading 'find')` on desktop. v0.2.2 routes event reads through `eventsOf()`, which prefers `snapshotEvents()`, tolerates the legacy `.events` array, and returns `not-found` instead of crashing.
 
 ## Development
 
