@@ -5,7 +5,7 @@
  * @module dsh-delete-message
  */
 export { name, inject, apply, buildStatus, deleteMessage, VERSION } from "./plugin.js";
-export { assessDeletion, buildPlaceholder, hasToolUse, insideOpenTurn, REFUSALS } from "./surface.js";
+export { assessDeletion, buildPlaceholder, eventsOf, hasToolUse, insideOpenTurn, REFUSALS } from "./surface.js";
 export {
 	BASE_PATH,
 	STATUS_PATH,

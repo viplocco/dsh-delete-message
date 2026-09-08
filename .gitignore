@@ -8,3 +8,4 @@ coverage/
 tmp-backup/
 tmp-probe/
 .tmp-research/
+.pnpm-store/

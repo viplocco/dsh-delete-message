@@ -516,3 +516,37 @@ export function buildPlaceholder(text = "[message deleted]") {
 		content: [{ type: "text", text }]
 	};
 }
+
+/**
+ * Materialize a session's full event array across harness versions.
+ *
+ * The current harness (`dsh-session` >= 0.1.2-rc.1) exposes events through the
+ * official `Session.snapshotEvents()` API (a frozen array, reused until the
+ * next append — exactly what `deriveMessages`/compaction read). Older shapes
+ * exposed a plain `.events` array directly. Every first-party host plugin
+ * (`dsh-compaction`, `dsh-session-title`) reads via `snapshotEvents()`; the
+ * bare `.events` field no longer exists and reading it yields `undefined`,
+ * which made `/status` and `/delete` throw `Cannot read properties of
+ * undefined (reading 'find')` on hosts running the newer harness (the DSH
+ * Desktop shell bundles it).
+ *
+ * Prefer the official snapshot API, tolerate the legacy array for hosts that
+ * still run an older `dsh-session`, and return `undefined` for anything else
+ * so callers can refuse with `not-found` instead of crashing.
+ *
+ * @param {any} session - a live session object from the `sessions` service.
+ * @returns {readonly any[]|undefined} the full event array, or `undefined`.
+ */
+export function eventsOf(session) {
+	if (session === null || session === undefined) return undefined;
+	if (typeof session.snapshotEvents === "function") {
+		try {
+			const events = session.snapshotEvents();
+			return Array.isArray(events) ? events : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	if (Array.isArray(session.events)) return session.events;
+	return undefined;
+}

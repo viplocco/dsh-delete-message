@@ -1,6 +1,6 @@
 {
   "name": "dsh-delete-message",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Per-message delete for DeepSeek Harness — a trash icon beside the copy button on every chat message that removes that message from the derived model context (and the visible transcript) via the official surface-replace contract",
   "type": "module",
   "license": "MIT",
@@ -27,7 +27,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "check:upgrade": "node scripts/run-upgrade-check.mjs",
+    "check:upgrade:smoke": "node scripts/smoke-render.mjs"
   },
   "keywords": [
     "dsh-plugin",
@@ -49,6 +51,9 @@
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-primitives"
       ]
+    },
+    "engines": {
+      "dsh": ">=0.1.1-rc.2"
     }
   }
 }

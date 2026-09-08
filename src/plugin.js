@@ -37,6 +37,7 @@ import {
 	assessDeletion,
 	boundClientWindow,
 	buildPlaceholder,
+	eventsOf,
 	planDeletion,
 	REFUSALS,
 	turnUnitCleared,
@@ -76,8 +77,15 @@ const PLACEHOLDER_EN = "[message deleted by user]";
 export async function buildStatus(sessions, sessionId, seqParam, scope) {
 	const session = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
 	if (session === undefined) return { ok: true, live: false, reason: "session-not-live" };
+	const events = eventsOf(session);
+	if (events === undefined) {
+		// The session shape is not one this plugin can read (a host harness
+		// without `snapshotEvents()` and without a legacy `.events` array). Refuse
+		// cleanly instead of crashing on `events.find(...)`.
+		return { ok: true, live: true, deletable: false, reason: REFUSALS.NOT_FOUND, version: VERSION };
+	}
 	const seq = Number(seqParam);
-	const verdict = planDeletion(session.events, seq, typeof scope === "string" && scope !== "" ? scope : undefined);
+	const verdict = planDeletion(events, seq, typeof scope === "string" && scope !== "" ? scope : undefined);
 	// Window chrome: ANY seq reports its user-input window and whether the
 	// whole unit is already deleted — that is how a client heals rows (tool/call
 	// summaries) that no surface replacement could ever cite. The client
@@ -86,9 +94,9 @@ export async function buildStatus(sessions, sessionId, seqParam, scope) {
 	// row appended after the delete point and hide all future replies. Because
 	// the left bound is a real user input (or the log head once bounded on the
 	// right), no real user row can ever be covered by it.
-	const semanticWindow = userWindowOf(session.events, seq);
-	const windowCleared = turnUnitCleared(session.events, semanticWindow);
-	const window = boundClientWindow(session.events, semanticWindow);
+	const semanticWindow = userWindowOf(events, seq);
+	const windowCleared = turnUnitCleared(events, semanticWindow);
+	const window = boundClientWindow(events, semanticWindow);
 	return {
 		ok: true,
 		live: true,
@@ -125,7 +133,8 @@ export async function deleteMessage(sessions, loggerLike, body) {
 	const session = sessions.get(sessionId);
 	if (session === undefined) return { ok: false, error: REFUSALS.NOT_FOUND, detail: "session-not-live" };
 
-	const events = session.events;
+	const events = eventsOf(session);
+	if (events === undefined) return { ok: false, error: REFUSALS.NOT_FOUND, detail: "session-events-unavailable" };
 	const scope = typeof body?.scope === "string" && body.scope !== "" ? body.scope : undefined;
 	const verdict = planDeletion(events, seq, scope);
 	if (!verdict.ok) {

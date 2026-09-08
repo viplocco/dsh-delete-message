@@ -51,16 +51,58 @@ DeepSeek Harness 消息级删除插件，用于避免用户误发或错误的消
 ## 安装（web profile）
 
 ```sh
-dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.1
+dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.2
 ```
 
 安装后需**完全重启 DSH Web 进程**（宿主侧插件树仅在启动时读取）；客户端 bundle 由宿主按请求动态 serve，更新后硬刷新即生效。
+
+## 安装（desktop profile）
+
+DSH Desktop 外壳渲染的是**同一套 web 前端**（`@deepseek-ai/dsh-web-app` 组合 + 同一 WebServer 源），因此本插件天然兼容桌面端——唯一要求是把它装进桌面所属的 profile 并重启 DSH Desktop：
+
+```sh
+# 桌面端使用独立的 desktop profile，需单独安装
+dsh plugin --profile desktop add github:viplocco/dsh-delete-message#v0.2.2
+# 或从本地工作区：dsh plugin --profile desktop add link:E:/project/DSH/Delete-message
+```
+
+安装后**完全重启 DSH Desktop**，并在浏览器/渲染器硬刷新。核实是否生效：
+
+```sh
+dsh --profile desktop --dump-config   # 应出现 "# == dsh-delete-message" 段落
+# 渲染器打开开发者工具，控制台应出现 "[delete-message] bundle script executing"
+```
+
+> **为何之前"web 能用、桌面不能用"**：插件 host 半边曾读 `session.events`，被当前 harness（`dsh-session` ≥ 0.1.2-rc.1，DSH Desktop 打包）改名成 `session.snapshotEvents()`，导致桌面端 `/status` 抛 `Cannot read properties of undefined (reading 'find')`。v0.2.2 已改经 `eventsOf()` 兼容两代会话形状（优先 `snapshotEvents()`、容忍旧 `.events`、其余返回 `not-found` 而非崩溃）。
 
 ## 开发
 
 ```sh
 pnpm test    # node --test
 ```
+
+## 升级验证（DSH 核心升级后必跑）
+
+插件依赖三处宿主私有耦合——React fiber 内省（`__reactFiber$*`）、CSS-modules 哈希类名（`*_actions` 令牌）、以及 `data-chat-flow-key`/`data-context-source` 等 `data-*` DOM 钩子。这些耦合在宿主升级后**静默断裂**（图标/按钮不挂载，不报错），所以每次升级 DSH 核心后须跑一键回归：
+
+```sh
+# 前置：已完成核心升级并重启 dsh web（见 docs/DESIGN.md § 升级流程）
+node scripts/run-upgrade-check.mjs        # 全量：健康检查 + smoke + 三个深探针
+node scripts/run-upgrade-check.mjs --only-smoke   # 仅 Node 冒烟（不启动浏览器）
+node scripts/run-upgrade-check.mjs --probe preflight  # 单跑某个探针
+```
+
+脚本为每个探针启动一次性无头 Edge（独立 CDP 端口 + 独立临时 profile），结束后自动回收，遇已知的无头 Edge 导航崩溃会自动重试一次。环境变量覆盖：`DSH_EDGE`（Edge 可执行路径）、`DSH_PROBE_GUI`（默认 `http://127.0.0.1:3080/`）、`DSH_PROBE_PROJECT` / `DSH_PROBE_SESSION`（测试会话定位）、`DSH_KEEP_EDGE=1`（保留 Edge 便于调试）。
+
+探针清单（`tmp-probe/`）：
+
+| 探针 | 作用 |
+| --- | --- |
+| `verify-upgrade.mjs` | **P1 脆弱耦合健康检查**：fiber 解析、`*_actions` 哈希类名、`data-*` 锚点、助手槽位挂载（只读非破坏） |
+| `verify-preflight.mjs` | 预检判定缓存 + 图标置灰（fetch 垫片，零真实 POST） |
+| `verify-transition.mjs` | pending 态、弹窗退场、行退场动画、内联失败重试 |
+| `verify-dedup.mjs` | 台账清扫每快照去重门 |
+| `scripts/smoke-render.mjs` | Node 冒烟：bundle 加载、槽位注册、seq 解析、判定缓存/过渡契约 |
 
 架构、宿主契约与设计取舍详见 [docs/DESIGN.md](docs/DESIGN.md)。联系方式：viplocco@qq.com
 

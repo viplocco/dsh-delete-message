@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { assessDeletion, boundClientWindow, buildPlaceholder, enclosingTurnBracket, hasToolUse, insideOpenTurn, planDeletion, REFUSALS } from "../src/surface.js";
+import { assessDeletion, boundClientWindow, buildPlaceholder, enclosingTurnBracket, eventsOf, hasToolUse, insideOpenTurn, planDeletion, REFUSALS } from "../src/surface.js";
 
 /** Event factory — only the fields the rules read. */
 function event(seq, type, extra = {}) {
@@ -607,5 +607,49 @@ describe("boundClientWindow (persistent hide-range right-bounding)", () => {
 		assert.equal(planCoversLike(verdict.range, 8), true, "chrome inside the deleted unit stays covered");
 		assert.equal(planCoversLike(verdict.range, 9), false, "the clamp bound itself is exclusive");
 		assert.equal(planCoversLike(verdict.range, 100), false, "FUTURE appends must never fall inside");
+	});
+});
+
+describe("eventsOf (session event access across harness versions)", () => {
+	// Regression contract for the DSH Desktop crash: the host half used to read
+	// `session.events`, which the current harness (`dsh-session` >= 0.1.2-rc.1)
+	// replaced with the official `snapshotEvents()` API. On the desktop shell the
+	// bare field is `undefined`, so `/status` threw `Cannot read properties of
+	// undefined (reading 'find')`. `eventsOf` must prefer the snapshot API,
+	// tolerate the legacy `.events` array, and refuse anything else with
+	// `undefined` — never crash.
+
+	const snapshotLog = [event(0, "turn/start"), event(1, "user/message")];
+
+	it("reads the full event array through snapshotEvents() when present", () => {
+		const session = { snapshotEvents: () => snapshotLog };
+		assert.equal(eventsOf(session), snapshotLog);
+	});
+
+	it("falls back to a legacy .events array when snapshotEvents() is absent", () => {
+		const session = { events: snapshotLog };
+		assert.equal(eventsOf(session), snapshotLog);
+	});
+
+	it("returns undefined for a bare modern Session that exposes neither shape", () => {
+		// A raw `dsh-session@0.1.2-rc.1` Session has `log` + `snapshotEvents()`
+		// but no `.events`; if snapshotEvents() also fails, we must refuse, not crash.
+		const session = {};
+		assert.equal(eventsOf(session), undefined);
+	});
+
+	it("tolerates a snapshotEvents() that does not return an array", () => {
+		const session = { snapshotEvents: () => undefined };
+		assert.equal(eventsOf(session), undefined);
+	});
+
+	it("returns undefined for null/undefined sessions", () => {
+		assert.equal(eventsOf(null), undefined);
+		assert.equal(eventsOf(undefined), undefined);
+	});
+
+	it("a session with a working snapshotEvents() wins over a stale .events field", () => {
+		const session = { events: [event(0, "turn/start")], snapshotEvents: () => snapshotLog };
+		assert.equal(eventsOf(session), snapshotLog, "the official API must take precedence");
 	});
 });
