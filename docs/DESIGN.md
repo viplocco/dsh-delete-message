@@ -1,6 +1,6 @@
 # dsh-delete-message 技术方案
 
-状态：**v0.2.0 已发版（2026-08-29，GitHub tag `v0.2.0`）**。本文档记录"为什么这样设计"，包括每一条被否决的路——被否决的路比选中的路更值得写下来，因为下一次迭代最先想试的就是它们。
+状态：**v0.2.3 已发版（2026-08-31，GitHub tag `v0.2.3`）**。本文档记录"为什么这样设计"，包括每一条被否决的路——被否决的路比选中的路更值得写下来，因为下一次迭代最先想试的就是它们。
 
 ---
 
@@ -212,6 +212,26 @@ v0.1.2 收紧了两条防重复规则：**(a)** 候选条带只取悬停根的�
 
 **验证**：89 例单测 + smoke 全绿。纯 client 半区，硬刷新生效。
 
+### 4.10 回归记录：宿主 UI 结构迁移，用户/助手按钮双失效（2026-08-31 落地）
+
+**症状（用户报告，DSH Desktop）**：① 用户消息复制按钮右侧始终没有删除图标；② 每轮助手消息最后的删除按钮始终灰色（`opacity .4`，不可点击）。
+
+**根因（两条独立宿主结构错配，全在 client 半区）**：
+
+1. **用户消息：DOM 增强依赖已废弃的 `data-time-hover-root`。** §4.2 记录用户行是 `[data-time-hover-root]` 行 + 直接子操作条。但当前桌面打包宿主 `@deepseek-ai/dsh-client-ui-chat@0.1.2-rc.1` **不再输出该属性**（全库搜索为空），改用 `ChatNodeSeat` 包装器上的 `[data-chat-flow-kind="user"/"steering"]` 标识用户行（宿主自己的 MessageIconActions CSS 正用 `[data-chat-flow-kind=user]` 控制操作条悬停显隐）。同时操作条不再是"悬停根的直接子 div"，而是 `wrapper > div.userRow > div.*_actions` 的**孙子级**。旧 matcher 入口不命中 + 下钻只查直接子 → 用户行操作条永远找不到 → 垃圾桶永不挂载。
+
+2. **助手消息：`findSeqByMessageId` 不解析 turn-tail 的 `data.closing.finalNode`。** 该函数只查 `data.finalNode`（assistant-step 节点）与 steering 节点。宿主槽位把收尾助手消息放在 turn-tail 节点的 `data.closing.finalNode` 上（slot 传入的 `messageId` 正是 `closing.finalNode.messageId`）。当回合被折叠/压缩出快照（assistant-step 节点不在 `chat.nodes`）时，解析失败 → `resolved` 非 number → `disabled=true` → 按钮灰且不可点击（与预检置灰的 `data-dshdm-gray` 视觉不同：`disabled` 是原生属性，点击完全无效）。
+
+**修复（仅 client.js）**：
+- **入口迁移**：`startDomEnhancement` 的候选匹配从 `el.matches("[data-time-hover-root]")` 改为按 wrapper 的 `data-chat-flow-kind`（user/steering）+ `data-chat-flow-key` 识别。
+- **下钻泛化**：新增 `findActionsStrip(root)` BFS 沿子树定位第一个带 `*_actions` token 且含直接子按钮的 div（用户行操作条是 wrapper 的孙子级），不再假定直接子；STRIP_MARK 幂等语义不变。
+- **fiber 探针补强**：`probeElementsFor` 对 user/steering wrapper 优先用操作条复制按钮做 `seqFromFiber` 锚点，保证删除后隐藏/sweeper 能解析用户行。
+- **turn-tail 解析**：`findSeqByMessageId` 新增 `data.closing?.finalNode` 分支（统一 String(messageId) 比较），压缩回合恢复可删。
+
+**验证**：新增 `test/client.test.js`（7 例）钉死两条行为：嵌套 actions strip 定位（wrapper 无 `data-time-hover-root`、strip 是孙子级、BFS 命中）+ turn-tail seq 解析（`closing.finalNode` → 17 / assistant-step `finalNode` → 9 / steering → 5 / 未知 id → undefined）。全套 102 例单测（surface 57 + http 13 + packaging 25 + client 7）全绿。
+
+**教训**：DOM 增强这类"搭在宿主渲染结构上的桥"，必须对**宿主的现行标记**做探测——本插件假设的 `data-time-hover-root` 是更早宿主版的产物，宿主升级 UI 结构后静默失效（无报错、无日志，只有图标不出现）。迁移到宿主自用标记（`data-chat-flow-kind`）后即随宿主演进自洽；§4.2 的升级路径（宿主给 user 侧开对称槽位后整体退役 DOM 增强）依然成立。
+
 
 ## 5. Host API
 
@@ -265,5 +285,10 @@ v0.1.0 的占位 `user/message` 只有 `id/role/content`。`Session.append` 在�
   另：**性能审计落地**（§4.5）——模块级每快照修订去重门，把删除后台账非空时每次快照修订的清扫成本从 C×O(转录) 收敛为 O(转录)；**删除前预检缓存与图标置灰**（§4.6）——共享 TTL 判定缓存 + 三挂载点拒绝置灰/点击即原因；**删除过渡反馈**（§4.7）——确认弹窗 pending 态（spinner + 防重复提交 + 内联失败可重试）+ 行退场级联动画。均为纯 client 半区，硬刷新生效。
   另：**右开窗口持久化回归修复**（§4.8，2026-08-29）——删除末回合回复后继续对话，助手新回复全部被清扫器吞掉。服务端 `boundClientWindow` 把计划 range 与 /status window 钳到 lastEventSeq+1（宿主半区，需重启），客户端拒收右开范围 + 加载时消毒遗留台账（client 半区，硬刷新）。测试 89 例 + smoke 全绿。
   **发布记录（2026-08-29）**：提交 `6bb8730`(feat: src+test+smoke) → `d1289b6`(docs: README 双语补预检置灰/过渡反馈特性 + 新截图 + DESIGN.md §4.5–4.8) → `e787c06`(chore release)；annotated tag `v0.2.0` 中文注释随 main 推送 GitHub 并复核远端引用。安装副本五文件（src×4 + package.json）SHA256 一致、版本同步 0.2.0；生效需重启 dsh web 进程 + 浏览器硬刷新。
+- **v0.2.3**（当前发版，2026-08-31）：**适配桌面宿主 UI 结构迁移，修复用户/助手按钮双失效**（§4.10 回归记录，仅 client 半区，硬刷新生效）——
+  1. **用户消息删除按钮恢复挂载**：DOM 增强入口不再依赖已废弃的 `data-time-hover-root`（当前宿主 `dsh-client-ui-chat@0.1.2-rc.1` 不再输出），改用宿主现行标记 `data-chat-flow-kind`（user/steering）+ `data-chat-flow-key`；新增 `findActionsStrip()` BFS 下钻定位真正带 `*_actions` token 的操作条（用户行操作条是 wrapper 的孙子级，不再是直接子）；`probeElementsFor` 优先用操作条复制按钮做 fiber 锚点。
+  2. **助手消息按钮恢复可点击**：`findSeqByMessageId` 新增 turn-tail 节点 `data.closing.finalNode` 分支，压缩/折叠回合也能解析出 surface seq，不再 `disabled` 置灰。
+  3. **新增 `test/client.test.js`**（7 例）钉死两条行为；全套单测扩至 102 例（surface 57 + http 13 + packaging 25 + client 7）。
+  4. **发布记录（2026-08-31）**：提交 `b19ce26`(chore(release): v0.2.3，含 README 安装命令指向 `#v0.2.3`)；annotated tag `v0.2.3` 随 main 推送 GitHub 并复核远端引用；web/desktop 两 profile 安装副本均升至 0.2.3，client.js 修复内容已同步。
 - **撤销（对占位再 append 一个反向引用？评估可行性）。**（原同条目的"删除前预检缓存与图标置灰"已落地，见 §4.6）
 - **v1.0**：冷会话支持（fork-rebuild：inspect 全量 → 过滤 → 新会话 + 打开），若宿主届时提供原生编辑缝则迁移过去。
