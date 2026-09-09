@@ -512,6 +512,22 @@ button[data-dsh-delete-icon][data-dshdm-gray]{opacity:.35;cursor:not-allowed}
 				if (data.kind === "steering" && data.messageId !== undefined && String(data.messageId) === String(messageId)) {
 					return typeof data.seq === "number" ? data.seq : undefined;
 				}
+				// v0.2.3 compatibility: a TURN-TAIL node carries the closing
+				// assistant message under `data.closing.finalNode` (host
+				// `dsh-client-ui-chat@0.1.2-rc.1` renders settled replies this way
+				// when the assistant-step node has been folded/compacted out of the
+				// chat snapshot). The assistant-actions slot is handed
+				// `closing.finalNode.messageId`, so matching that shape lets a
+				// compacted turn still resolve its surface seq — otherwise the
+				// trash renders `disabled` (grey, unclickable) for every finished
+				// reply. Without this the button could never leave its grey state.
+				const closingFinal = data.closing?.finalNode;
+				if (
+					closingFinal !== null && typeof closingFinal === "object" &&
+					closingFinal.messageId !== undefined && String(closingFinal.messageId) === String(messageId)
+				) {
+					return typeof closingFinal.seq === "number" ? closingFinal.seq : undefined;
+				}
 			}
 			return undefined;
 		}
@@ -683,6 +699,19 @@ button[data-dsh-delete-icon][data-dshdm-gray]{opacity:.35;cursor:not-allowed}
 				const button = hover.querySelector("button");
 				if (button !== null) probes.push(button);
 				probes.push(hover);
+			}
+			// v0.2.3 compatibility: the host no longer emits `data-time-hover-root`;
+			// a user/steering row's actions strip (grandchild of the wrapper) is
+			// the most reliable fiber probe for its surface seq. If it exists,
+			// prefer its copy button so the sweeper/hider resolves the row.
+			const kind = wrapper.getAttribute?.("data-chat-flow-kind");
+			if (kind === "user" || kind === "steering") {
+				const strip = findActionsStrip(wrapper);
+				if (strip !== null) {
+					const copyButton = strip.querySelector(":scope > button");
+					if (copyButton !== null) probes.push(copyButton);
+					probes.push(strip);
+				}
 			}
 			// Try the first few direct element children — for assistant-step and
 			// similar rows the flow-item div has no hover root and its children
@@ -1638,6 +1667,39 @@ button[data-dsh-delete-icon][data-dshdm-gray]{opacity:.35;cursor:not-allowed}
 		}
 
 		/**
+		 * Locate the host's MessageIconActions strip under a user/steering row,
+		 * whatever its nesting depth.
+		 *
+		 * v0.2.3 compatibility: the current host UI
+		 * (`dsh-client-ui-chat@0.1.2-rc.1`) renders a user row as
+		 *   wrapper[data-chat-flow-key][data-chat-flow-kind="user"]
+		 *     └─ div.userRow
+		 *          └─ div.userStack > div.bubble        (text)
+		 *          └─ div.<hash>_actions > button.copy  (the actions strip)
+		 * i.e. the strip is a GRANDCHILD of the wrapper, not a direct child.
+		 * The pre-v0.2.3 matcher required the root to carry the now-removed
+		 * `data-time-hover-root` attribute and looked for a DIRECT-child div
+		 * with an `*_actions` token, so it could never find this strip and the
+		 * user-message trash never mounted. We therefore walk DOWN from the
+		 * wrapper (instead of assuming a direct child) and stop at the first
+		 * div that is a real actions strip (host token + a direct child button).
+		 * Idempotence is the caller's job via STRIP_MARK; this helper only
+		 * finds a candidate.
+		 * @param {Element} root - the wrapper to search underneath (exclusive).
+		 * @returns {Element|null} the first matching actions strip, or null.
+		 */
+		function findActionsStrip(root) {
+			const queue = [];
+			for (const child of root.children) queue.push(child);
+			while (queue.length > 0) {
+				const el = queue.shift();
+				if (looksLikeActionsStrip(el)) return el;
+				for (const child of el.children) queue.push(child);
+			}
+			return null;
+		}
+
+		/**
 		 * Enhance ONE actions strip: the caller has already narrowed it to a
 		 * direct-child div of the hover root carrying an `*_actions` class token,
 		 * and this guard keeps the work idempotent across observer batches. Any
@@ -2142,15 +2204,22 @@ button[data-dsh-delete-icon][data-dshdm-gray]{opacity:.35;cursor:not-allowed}
 						for (const wrapper of flowItemsWithin(node)) processFlowItem(wrapper, source);
 						const candidates = [node, ...node.querySelectorAll("*")];
 						for (const el of candidates) {
-							if (!el.matches("[data-time-hover-root]")) continue;
+							// v0.2.3 compatibility: the host no longer emits
+							// `data-time-hover-root`. A user/steering row is
+							// identified by its wrapper's `data-chat-flow-kind`
+							// (the same attribute the host's own CSS uses to reveal
+							// the actions strip on hover). We recognise the WRAPPER,
+							// then drill down to the actions strip at whatever depth
+							// it sits.
+							const kind = el.getAttribute?.("data-chat-flow-kind");
+							if (!(kind === "user" || kind === "steering")) continue;
+							if (!el.hasAttribute("data-chat-flow-key")) continue;
 							if (el.hasAttribute("data-turn-tail")) continue;
 							if (el.hasAttribute("data-pending-steering")) continue;
-							for (const child of el.children) {
-								if (child.hasAttribute(STRIP_MARK)) continue;
-								if (!looksLikeActionsStrip(child)) continue;
-								const disposer = enhanceUserRow(child, source, t);
-								if (typeof disposer === "function") disposers.push(disposer);
-							}
+							const strip = findActionsStrip(el);
+							if (strip === null || strip.hasAttribute(STRIP_MARK)) continue;
+							const disposer = enhanceUserRow(strip, source, t);
+							if (typeof disposer === "function") disposers.push(disposer);
 						}
 					}
 				}
@@ -2481,6 +2550,7 @@ button[data-dsh-delete-icon][data-dshdm-gray]{opacity:.35;cursor:not-allowed}
 			enhanceChromeRow,
 			startDomEnhancement,
 			looksLikeActionsStrip,
+			findActionsStrip,
 			ACTIONS_TOKEN,
 			translateWith,
 			detectDomLocale,

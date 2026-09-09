@@ -51,7 +51,7 @@ DeepSeek Harness 消息级删除插件，用于避免用户误发或错误的消
 ## 安装（web profile）
 
 ```sh
-dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.2
+dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.3
 ```
 
 安装后需**完全重启 DSH Web 进程**（宿主侧插件树仅在启动时读取）；客户端 bundle 由宿主按请求动态 serve，更新后硬刷新即生效。
@@ -62,7 +62,7 @@ DSH Desktop 外壳渲染的是**同一套 web 前端**（`@deepseek-ai/dsh-web-a
 
 ```sh
 # 桌面端使用独立的 desktop profile，需单独安装
-dsh plugin --profile desktop add github:viplocco/dsh-delete-message#v0.2.2
+dsh plugin --profile desktop add github:viplocco/dsh-delete-message#v0.2.3
 # 或从本地工作区：dsh plugin --profile desktop add link:E:/project/DSH/Delete-message
 ```
 

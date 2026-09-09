@@ -51,7 +51,7 @@ Clicking the trash in different locations produces different deletion scopes, di
 ## Installation (web profile)
 
 ```sh
-dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.2
+dsh plugin --profile web add github:viplocco/dsh-delete-message#v0.2.3
 ```
 
 After installing, **fully restart the DSH Web process** (the host-side plugin tree is read only at startup); the client bundle is served dynamically per request by the host, so updates take effect on a hard refresh.
@@ -62,7 +62,7 @@ The DSH Desktop shell renders the **same web frontend** (the `@deepseek-ai/dsh-w
 
 ```sh
 # The desktop app uses a separate desktop profile; install it there too
-dsh plugin --profile desktop add github:viplocco/dsh-delete-message#v0.2.2
+dsh plugin --profile desktop add github:viplocco/dsh-delete-message#v0.2.3
 # or from a local checkout: dsh plugin --profile desktop add link:<path>
 ```
 
